@@ -164,6 +164,9 @@ impl EnclaveEncryptor for SoftwareEncryptor {
         use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
         use p256::ecdh::diffie_hellman;
 
+        // AccessPolicy is stored in key metadata but is not enforced here.
+        // The private key is loaded from the keyring and decrypted without any
+        // user prompt, regardless of the policy recorded at generation time.
         validate_label(label)?;
         if ciphertext.len() < MIN_CIPHERTEXT_LEN {
             return Err(Error::DecryptFailed {

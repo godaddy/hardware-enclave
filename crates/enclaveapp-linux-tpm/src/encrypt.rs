@@ -281,6 +281,10 @@ impl EnclaveEncryptor for LinuxTpmEncryptor {
     fn decrypt(&self, label: &str, ciphertext: &[u8]) -> Result<Vec<u8>> {
         use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
 
+        // AccessPolicy is stored in key metadata but is not enforced here.
+        // The TPM key uses empty authorization and `ecdh_z_gen` runs without
+        // an HMAC/auth session, so no user prompt occurs regardless of the
+        // policy recorded at generation time.
         validate_label(label)?;
 
         if ciphertext.len() < MIN_CIPHERTEXT_LEN {

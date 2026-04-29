@@ -38,10 +38,18 @@ pub enum AccessPolicy {
 /// often* the user must reproduce it.
 ///
 /// On macOS the choice is implemented by passing (or omitting) a long-lived
-/// `LAContext` to CryptoKit's `SecureEnclave.P256.Signing.PrivateKey`. The
-/// non-mac platforms (Linux software, Windows TPM) do not have an analogous
-/// cached-context concept, so they treat all variants identically — the gate
-/// is the key's underlying access policy alone.
+/// `LAContext` to CryptoKit's `SecureEnclave.P256.Signing.PrivateKey`.
+///
+/// Other platforms do not have an analogous cached-context concept and treat
+/// all variants identically:
+///
+/// - **Windows TPM (CNG):** The hardware enforces `NCRYPT_UI_POLICY` per
+///   sign, so every signature triggers a fresh Windows Hello prompt.
+/// - **Linux TPM and software / keyring backends:** No gate at all.
+///   `AccessPolicy` is stored in metadata but is not consulted at sign or
+///   decrypt time, so all `PresenceMode` variants behave the same as
+///   `PresenceMode::None`. See the "Linux TPM backend" section of
+///   `THREAT_MODEL.md`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PresenceMode {
