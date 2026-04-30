@@ -105,7 +105,17 @@ permissions:
 jobs:
   build:
     name: Build (${{ matrix.target }})
-    runs-on: ${{ contains(matrix.target, 'windows') && 'windows-latest' || (contains(matrix.target, 'linux') && 'ubuntu-22.04' || 'macos-latest') }}
+    # Native runners for every target — no cross-compile fragility:
+    #
+    # * Windows targets → windows-latest (x86_64; the aarch64-pc-windows
+    #   target cross-compiles from x86_64 here, which the existing
+    #   "Build release" step handles).
+    # * aarch64 Linux targets → ubuntu-24.04-arm (GitHub-hosted native
+    #   ARM64 Linux runner, free for public repos as of early 2025).
+    # * Other Linux targets → ubuntu-22.04 (x86_64 native).
+    # * macOS targets → macos-latest (arm64 native; the x86_64 target
+    #   cross-compiles from arm64 here via Apple's Xcode toolchain).
+    runs-on: ${{ contains(matrix.target, 'windows') && 'windows-latest' || ((matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'aarch64-unknown-linux-musl') && 'ubuntu-24.04-arm' || (contains(matrix.target, 'linux') && 'ubuntu-22.04' || 'macos-latest')) }}
     strategy:
       matrix:
         target: ${{ fromJson(inputs.targets) }}
@@ -649,14 +659,26 @@ jobs:
           intel_sha=$(sha256sum "artifacts/${app}-x86_64-apple-darwin/${app}-x86_64-apple-darwin.tar.gz" | cut -d' ' -f1)
 
           # Linuxbrew support is opt-in by virtue of the consumer building
-          # an `x86_64-unknown-linux-gnu` artifact. When that tarball is
-          # present in the release, the formula gains an `on_linux` block;
-          # otherwise the formula stays macOS-only as before.
-          linux_artifact_path="artifacts/${app}-x86_64-unknown-linux-gnu/${app}-x86_64-unknown-linux-gnu.tar.gz"
-          linux_sha=""
+          # any Linux gnu artifact. The formula's `on_linux do` block
+          # mirrors the macOS structure: `on_arm` and `on_intel` nested
+          # blocks, each conditionally emitted based on whether the
+          # consumer ships that arch.
+          linux_intel_artifact="artifacts/${app}-x86_64-unknown-linux-gnu/${app}-x86_64-unknown-linux-gnu.tar.gz"
+          linux_arm_artifact="artifacts/${app}-aarch64-unknown-linux-gnu/${app}-aarch64-unknown-linux-gnu.tar.gz"
+          linux_intel_sha=""
+          linux_arm_sha=""
+          ship_linux_intel=0
+          ship_linux_arm=0
+          if [ -f "$linux_intel_artifact" ]; then
+            linux_intel_sha=$(sha256sum "$linux_intel_artifact" | cut -d' ' -f1)
+            ship_linux_intel=1
+          fi
+          if [ -f "$linux_arm_artifact" ]; then
+            linux_arm_sha=$(sha256sum "$linux_arm_artifact" | cut -d' ' -f1)
+            ship_linux_arm=1
+          fi
           ship_linux=0
-          if [ -f "$linux_artifact_path" ]; then
-            linux_sha=$(sha256sum "$linux_artifact_path" | cut -d' ' -f1)
+          if [ "$ship_linux_intel" = 1 ] || [ "$ship_linux_arm" = 1 ]; then
             ship_linux=1
           fi
 
@@ -705,10 +727,17 @@ jobs:
           done
 
           # Build the on_linux URL block (or empty string when the
-          # consumer doesn't ship a Linux artifact).
+          # consumer ships no Linux artifact). When both arches ship
+          # we mirror the macOS pattern with nested on_arm/on_intel;
+          # when only one ships, we emit a flat block to avoid a
+          # half-empty container.
           linux_url_block=""
-          if [ "$ship_linux" = 1 ]; then
-            linux_url_block=$(printf '\n  on_linux do\n    url "https://github.com/godaddy/%s/releases/download/%s/%s-x86_64-unknown-linux-gnu.tar.gz"\n    sha256 "%s"\n  end\n' "$app" "$tag" "$app" "$linux_sha")
+          if [ "$ship_linux_intel" = 1 ] && [ "$ship_linux_arm" = 1 ]; then
+            linux_url_block=$(printf '\n  on_linux do\n    on_arm do\n      url "https://github.com/godaddy/%s/releases/download/%s/%s-aarch64-unknown-linux-gnu.tar.gz"\n      sha256 "%s"\n    end\n\n    on_intel do\n      url "https://github.com/godaddy/%s/releases/download/%s/%s-x86_64-unknown-linux-gnu.tar.gz"\n      sha256 "%s"\n    end\n  end\n' "$app" "$tag" "$app" "$linux_arm_sha" "$app" "$tag" "$app" "$linux_intel_sha")
+          elif [ "$ship_linux_intel" = 1 ]; then
+            linux_url_block=$(printf '\n  on_linux do\n    url "https://github.com/godaddy/%s/releases/download/%s/%s-x86_64-unknown-linux-gnu.tar.gz"\n    sha256 "%s"\n  end\n' "$app" "$tag" "$app" "$linux_intel_sha")
+          elif [ "$ship_linux_arm" = 1 ]; then
+            linux_url_block=$(printf '\n  on_linux do\n    url "https://github.com/godaddy/%s/releases/download/%s/%s-aarch64-unknown-linux-gnu.tar.gz"\n    sha256 "%s"\n  end\n' "$app" "$tag" "$app" "$linux_arm_sha")
           fi
 
           # Heredoc with leading-whitespace stripped by sed at the end.
