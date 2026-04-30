@@ -53,9 +53,38 @@ pub fn create_key(
     }
     let key = NcryptHandle(NCRYPT_HANDLE(key_handle.0));
 
-    // Set UI policy if the caller requested authentication.
+    // Decide whether to set `NCRYPT_UI_PROTECT_KEY_FLAG` on the key.
+    //
+    // - `AccessPolicy::None`: never set, no prompt at any time.
+    //
+    // - With the `windows-hello-ui` feature on (default), probe
+    //   Hello at keygen time:
+    //
+    //   - Hello *is* enrolled (PIN / face / fingerprint usable):
+    //     skip the flag. The Rust-side `request_consent_for_policy`
+    //     in `sign` / `decrypt` will fire Hello at use time
+    //     deterministically, and we don't want the flag's CryptUI
+    //     password protector firing on top at `NCryptFinalizeKey`.
+    //     This is the ideal path: zero password dialogs, Hello
+    //     prompt only at use time.
+    //
+    //   - Hello *not* enrolled: keep the flag so the TPM still
+    //     gates use behind *some* UI — the legacy CryptUI password
+    //     prompt. Worse UX than Hello but never silent signing,
+    //     which the user explicitly preferred over no prompt at
+    //     all.
+    //
+    // - Without the feature (`default-features = false`): set the
+    //   flag whenever the policy demands presence. This preserves
+    //   the pre-feature implementation as an "ifdef" path.
     if policy != AccessPolicy::None {
-        set_ui_policy(&key, policy)?;
+        #[cfg(feature = "windows-hello-ui")]
+        let hello_available = crate::hello::is_hello_available();
+        #[cfg(not(feature = "windows-hello-ui"))]
+        let hello_available = false;
+        if !hello_available {
+            set_ui_policy(&key, policy)?;
+        }
     }
 
     // Persist the key to the TPM.

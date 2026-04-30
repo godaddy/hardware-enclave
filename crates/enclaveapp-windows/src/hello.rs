@@ -52,6 +52,26 @@ use windows::Security::Credentials::UI::{
     UserConsentVerificationResult, UserConsentVerifier, UserConsentVerifierAvailability,
 };
 
+/// Cheap synchronous probe for whether Hello is in a state that
+/// will produce a real prompt right now. Used at keygen time to
+/// decide whether to set `NCRYPT_UI_PROTECT_KEY_FLAG` on the
+/// created key — when Hello is enrolled we skip the flag (the
+/// Rust-side `request_consent_for_policy` will fire Hello at use
+/// time), when Hello is missing we keep the flag so the user still
+/// sees the legacy CryptUI password prompt instead of having a key
+/// that signs silently.
+///
+/// Returns `true` only when `UserConsentVerifier::CheckAvailability`
+/// reports `Available`. Any error or non-Available status (no PIN
+/// enrolled, disabled by policy, biometric devices missing, etc.)
+/// returns `false` so the caller falls through to the flag.
+pub fn is_hello_available() -> bool {
+    let Ok(op) = UserConsentVerifier::CheckAvailabilityAsync() else {
+        return false;
+    };
+    matches!(op.get(), Ok(UserConsentVerifierAvailability::Available))
+}
+
 /// Outcome of a Hello prompt attempt that the caller can act on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsentOutcome {
