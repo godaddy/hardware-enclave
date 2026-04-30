@@ -11,9 +11,34 @@ repository.workspace = true
 workspace = true
 
 [features]
-default = []
+default = ["windows-hello-ui"]
 signing = ["sha2"]
 encryption = ["sha2"]
+# When enabled, key operations that require user presence
+# (`AccessPolicy != None`) explicitly invoke
+# `Windows.Security.Credentials.UI.UserConsentVerifier` from WinRT
+# before issuing the actual TPM call. That call deterministically
+# routes through the Windows Hello stack — biometric (face /
+# fingerprint) is preferred, with PIN as fallback — instead of
+# leaving the prompt up to whatever CNG / CryptUI feels like
+# showing for `NCRYPT_UI_PROTECT_KEY_FLAG`. This is the only path
+# that reliably fires a Hello touch UI on Hello-enrolled hosts; the
+# legacy flag, on its own, can surface as the older CryptUI
+# password protector depending on the host's Hello configuration.
+#
+# The TPM-side `NCRYPT_UI_PROTECT_KEY_FLAG` is still set on every
+# user-presence key regardless of this feature so the hardware UI
+# gate is never weaker than the pre-feature implementation. The
+# feature *adds* a Hello prompt — it doesn't remove the
+# hardware-enforced one.
+#
+# Disabling this feature (or building with
+# `default-features = false`) reverts to flag-only behavior so the
+# pre-existing implementation is preserved as an "ifdef" path.
+# UserConsentVerifier is part of the WinRT API surface present on
+# every Windows 10/11 install and works from any user-mode app —
+# no code signing is required.
+windows-hello-ui = []
 
 [dependencies]
 enclaveapp-core = { workspace = true }

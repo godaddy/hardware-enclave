@@ -214,6 +214,23 @@ impl EnclaveEncryptor for TpmEncryptor {
         };
         crate::ui_policy::verify_ui_policy_matches(&key_handle, expected_policy)?;
 
+        // Symmetric to the sign path: route the user-presence prompt
+        // through Windows Hello before the TPM ECDH operation. See
+        // `sign::sign` and `crate::hello` for the routing rationale.
+        #[cfg(feature = "windows-hello-ui")]
+        if expected_policy != AccessPolicy::None {
+            use crate::hello::{request_consent_for_policy, ConsentOutcome};
+            let prompt = format!("{}: decrypt with key '{label}'", self.app_name);
+            match request_consent_for_policy(expected_policy, &prompt)? {
+                ConsentOutcome::Verified | ConsentOutcome::NotAvailable => {}
+                ConsentOutcome::Declined => {
+                    return Err(Error::DecryptFailed {
+                        detail: "user declined Windows Hello prompt for decrypt operation".into(),
+                    });
+                }
+            }
+        }
+
         unsafe { ecies_decrypt(&key_handle, ephemeral_pub, nonce, ct, tag) }
     }
 }

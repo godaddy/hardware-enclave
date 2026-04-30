@@ -2,6 +2,21 @@
 // SPDX-License-Identifier: MIT
 
 //! NCrypt provider management and RAII handle wrapper.
+//!
+//! Keys are persisted in the **Microsoft Platform Crypto Provider**
+//! (TPM 2.0). The Microsoft Passport / NGC KSP was investigated as
+//! an alternative for Windows Hello routing but rejected:
+//! `NCryptCreatePersistedKey` against `Microsoft Passport Key
+//! Storage Provider` returns `NTE_INVALID_PARAMETER (0x80090027)` on
+//! every algorithm / flag combination tried even on hosts where
+//! Hello (PIN + biometric) is fully enrolled (`dsregcmd /status`
+//! reports `NgcSet : YES`). The NCrypt path to NGC appears to be
+//! reserved for system services / domain controllers; user-mode
+//! callers are expected to go through `KeyCredentialManager` (WinRT)
+//! or `WebAuthn`. Keeping keys in the Platform KSP and routing the
+//! UI prompt through `Windows.Security.Credentials.UI.UserConsentVerifier`
+//! delivers a Hello prompt deterministically on Hello-enrolled hosts
+//! without requiring NGC-resident keys. See [`crate::hello`].
 
 // This module wraps NCrypt C APIs which require unsafe FFI calls.
 #![allow(unsafe_code, unused_qualifications, let_underscore_drop)]

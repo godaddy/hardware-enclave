@@ -156,6 +156,28 @@ impl EnclaveSigner for TpmSigner {
         };
         crate::ui_policy::verify_ui_policy_matches(&key_handle, expected_policy)?;
 
+        // Route the user-presence prompt through Windows Hello before
+        // the TPM call. On Hello-enrolled hosts this fires the
+        // biometric / PIN dialog deterministically; on hosts where
+        // Hello isn't available we fall through and let the
+        // hardware-side `NCRYPT_UI_PROTECT_KEY_FLAG` produce whatever
+        // CryptUI dialog the platform chooses (the pre-feature
+        // behavior). User cancel is fatal — they actively refused
+        // to authorize this signature, don't try to sign anyway.
+        #[cfg(feature = "windows-hello-ui")]
+        if expected_policy != AccessPolicy::None {
+            use crate::hello::{request_consent_for_policy, ConsentOutcome};
+            let prompt = format!("{}: sign with key '{label}'", self.app_name);
+            match request_consent_for_policy(expected_policy, &prompt)? {
+                ConsentOutcome::Verified | ConsentOutcome::NotAvailable => {}
+                ConsentOutcome::Declined => {
+                    return Err(Error::SignFailed {
+                        detail: "user declined Windows Hello prompt for sign operation".into(),
+                    });
+                }
+            }
+        }
+
         // Pre-hash with SHA-256.
         let digest = Sha256::digest(data);
 

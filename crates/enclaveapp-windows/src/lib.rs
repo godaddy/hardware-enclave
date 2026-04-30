@@ -13,6 +13,8 @@
 
 #[cfg(target_os = "windows")]
 mod export;
+#[cfg(all(target_os = "windows", feature = "windows-hello-ui"))]
+mod hello;
 #[cfg(target_os = "windows")]
 mod key;
 #[cfg(target_os = "windows")]
