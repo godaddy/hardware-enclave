@@ -865,7 +865,8 @@ public func enclaveapp_keychain_store(
 public func enclaveapp_keychain_load(
     _ service: UnsafePointer<UInt8>, _ service_len: Int32,
     _ account: UnsafePointer<UInt8>, _ account_len: Int32,
-    _ secret_out: UnsafeMutablePointer<UInt8>, _ secret_len: UnsafeMutablePointer<Int32>
+    _ secret_out: UnsafeMutablePointer<UInt8>, _ secret_len: UnsafeMutablePointer<Int32>,
+    _ access_group: UnsafePointer<UInt8>?, _ access_group_len: Int32
 ) -> Int32 {
     return traceDuration("keychain_load") {
         guard let serviceStr = makeServiceString(service, service_len) else {
@@ -875,43 +876,76 @@ public func enclaveapp_keychain_load(
         return SE_ERR_KEYCHAIN_LOAD
     }
 
-    let useExplicit = !hasDefaultKeychain()
-    let kc: SecKeychain? = useExplicit ? openLoginKeychain() : nil
-    if useExplicit && kc == nil {
-        return SE_ERR_KEYCHAIN_NOT_FOUND
-    }
+    let accessGroup: String? = {
+        guard let ptr = access_group, access_group_len > 0 else { return nil }
+        return makeUtf8String(ptr, access_group_len)
+    }()
 
-    var query: [String: Any] = [
-        kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: serviceStr,
-        kSecAttrAccount as String: accountStr,
-        kSecReturnData as String: true,
-        kSecMatchLimit as String: kSecMatchLimitOne,
-    ]
-    if let kc = kc { query[kSecMatchSearchList as String] = [kc] }
-    var item: CFTypeRef?
-    let status = SecItemCopyMatching(query as CFDictionary, &item)
-    keychainTrace(
-        "op=load service=\(serviceStr) account=\(accountStr) status=\(status)"
-    )
-    if status == errSecItemNotFound {
-        return SE_ERR_KEYCHAIN_NOT_FOUND
-    }
-    if status != errSecSuccess {
-        return SE_ERR_KEYCHAIN_LOAD
-    }
-    guard let data = item as? Data else {
-        return SE_ERR_KEYCHAIN_LOAD
-    }
-
-    let count = Int32(data.count)
-    if secret_len.pointee < count {
+    // Helper that performs a SecItemCopyMatching with the given keychain
+    // routing options and copies the result into the caller's buffer.
+    // Returns the SE_* result code (or `nil` on errSecItemNotFound,
+    // letting the caller decide whether to retry on a different
+    // keychain).
+    func tryLoad(useDP: Bool, useExplicitLegacy: Bool) -> Int32? {
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: serviceStr,
+            kSecAttrAccount as String: accountStr,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        if useDP {
+            query[kSecUseDataProtectionKeychain as String] = true
+            if let group = accessGroup {
+                query[kSecAttrAccessGroup as String] = group
+            }
+        } else if useExplicitLegacy {
+            guard let kc = openLoginKeychain() else { return SE_ERR_KEYCHAIN_NOT_FOUND }
+            query[kSecMatchSearchList as String] = [kc]
+        }
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        keychainTrace(
+            "op=load service=\(serviceStr) account=\(accountStr) " +
+            "dp=\(useDP) group=\(accessGroup ?? "<nil>") status=\(status)"
+        )
+        if status == errSecItemNotFound {
+            return nil
+        }
+        if status != errSecSuccess {
+            return SE_ERR_KEYCHAIN_LOAD
+        }
+        guard let data = item as? Data else {
+            return SE_ERR_KEYCHAIN_LOAD
+        }
+        let count = Int32(data.count)
+        if secret_len.pointee < count {
+            secret_len.pointee = count
+            return SE_ERR_BUFFER_TOO_SMALL
+        }
+        data.copyBytes(to: secret_out, count: data.count)
         secret_len.pointee = count
-        return SE_ERR_BUFFER_TOO_SMALL
+        return SE_OK
     }
-    data.copyBytes(to: secret_out, count: data.count)
-    secret_len.pointee = count
-    return SE_OK
+
+    // When the caller supplies an access group, try the Data Protection
+    // keychain first — that's where `enclaveapp_keychain_store` puts
+    // entitled-binary items. On NotFound, fall back to the legacy
+    // keychain so wrapping-key items written by older binaries (or by
+    // builds without the entitlement) remain reachable. The fallback
+    // makes upgrades transparent: existing v<entitled> keys stored to
+    // the legacy keychain still decrypt cleanly under the new binary.
+    if accessGroup != nil {
+        if let result = tryLoad(useDP: true, useExplicitLegacy: false) {
+            return result
+        }
+        // DP miss → fall through to legacy.
+    }
+    let useExplicitLegacy = !hasDefaultKeychain()
+    if let result = tryLoad(useDP: false, useExplicitLegacy: useExplicitLegacy) {
+        return result
+    }
+    return SE_ERR_KEYCHAIN_NOT_FOUND
     }
 }
 
@@ -921,7 +955,8 @@ public func enclaveapp_keychain_load(
 @_cdecl("enclaveapp_keychain_delete")
 public func enclaveapp_keychain_delete(
     _ service: UnsafePointer<UInt8>, _ service_len: Int32,
-    _ account: UnsafePointer<UInt8>, _ account_len: Int32
+    _ account: UnsafePointer<UInt8>, _ account_len: Int32,
+    _ access_group: UnsafePointer<UInt8>?, _ access_group_len: Int32
 ) -> Int32 {
     return traceDuration("keychain_delete") {
         guard let serviceStr = makeServiceString(service, service_len) else {
@@ -931,26 +966,63 @@ public func enclaveapp_keychain_delete(
             return SE_ERR_KEYCHAIN_DELETE
         }
 
-        let useExplicit = !hasDefaultKeychain()
-        let kc: SecKeychain? = useExplicit ? openLoginKeychain() : nil
-        if useExplicit && kc == nil {
-            // Delete is idempotent — report not-found so the Rust
-            // caller treats the entry as already-gone rather than
-            // erroring out.
-            return SE_ERR_KEYCHAIN_NOT_FOUND
+        let accessGroup: String? = {
+            guard let ptr = access_group, access_group_len > 0 else { return nil }
+            return makeUtf8String(ptr, access_group_len)
+        }()
+
+        // Helper that performs a SecItemDelete with the given keychain
+        // routing options. Returns the OSStatus (success / NotFound /
+        // error). Caller treats NotFound as a benign "already gone".
+        func tryDelete(useDP: Bool, useExplicitLegacy: Bool) -> OSStatus {
+            var query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: serviceStr,
+                kSecAttrAccount as String: accountStr,
+            ]
+            if useDP {
+                query[kSecUseDataProtectionKeychain as String] = true
+                if let group = accessGroup {
+                    query[kSecAttrAccessGroup as String] = group
+                }
+            } else if useExplicitLegacy {
+                guard let kc = openLoginKeychain() else {
+                    return errSecNoDefaultKeychain
+                }
+                query[kSecMatchSearchList as String] = [kc]
+            }
+            let status = SecItemDelete(query as CFDictionary)
+            keychainTrace(
+                "op=delete service=\(serviceStr) account=\(accountStr) " +
+                "dp=\(useDP) group=\(accessGroup ?? "<nil>") status=\(status)"
+            )
+            return status
         }
 
-        var query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: serviceStr,
-            kSecAttrAccount as String: accountStr,
-        ]
-        if let kc = kc { query[kSecMatchSearchList as String] = [kc] }
-        let status = SecItemDelete(query as CFDictionary)
-        keychainTrace(
-            "op=delete service=\(serviceStr) account=\(accountStr) status=\(status)"
+        // When the caller supplies an access group, sweep both
+        // keychains. Items written by an entitled binary live in the
+        // DP keychain; items written by older / unentitled builds live
+        // in the legacy keychain. We don't know which one a given
+        // service+account was stored in, and the caller treats delete
+        // as idempotent, so removing from both is safe and ensures we
+        // don't leave stale entries behind on either side.
+        var dpStatus: OSStatus = errSecItemNotFound
+        if accessGroup != nil {
+            dpStatus = tryDelete(useDP: true, useExplicitLegacy: false)
+        }
+        let legacyStatus = tryDelete(
+            useDP: false,
+            useExplicitLegacy: !hasDefaultKeychain()
         )
-        if status == errSecSuccess || status == errSecItemNotFound {
+
+        // Success if either delete succeeded; otherwise both must be
+        // NotFound (idempotent no-op) for us to claim success.
+        if dpStatus == errSecSuccess || legacyStatus == errSecSuccess {
+            return SE_OK
+        }
+        if (accessGroup == nil || dpStatus == errSecItemNotFound)
+            && legacyStatus == errSecItemNotFound
+        {
             return SE_OK
         }
         return SE_ERR_KEYCHAIN_DELETE

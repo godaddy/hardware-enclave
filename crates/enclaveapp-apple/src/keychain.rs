@@ -270,10 +270,12 @@ pub fn generate_and_save_key(
     };
 
     let app_name_for_cleanup = app_name.clone();
+    let access_group_for_cleanup = config.keychain_access_group.clone();
     let cleanup = move || {
         drop(crate::keychain_wrap::keychain_delete(
             &app_name_for_cleanup,
             &label_owned,
+            access_group_for_cleanup.as_deref(),
         ));
         delete_key_from_data_rep(&data_rep)
     };
@@ -431,6 +433,7 @@ pub fn load_handle(config: &KeychainConfig, label: &str) -> Result<Vec<u8>> {
         label,
         &contents,
         config.wrapping_key_cache_ttl,
+        config.keychain_access_group.as_deref(),
     )? {
         Some(plaintext) => Ok(plaintext),
         None => Err(Error::KeyOperation {
@@ -518,7 +521,11 @@ pub fn delete_key(config: &KeychainConfig, label: &str) -> Result<()> {
     // the local files were fully removed. If it fails here, log but
     // don't propagate — a stale keychain entry without its handle is
     // useless.
-    if let Err(error) = crate::keychain_wrap::keychain_delete(&config.app_name, label) {
+    if let Err(error) = crate::keychain_wrap::keychain_delete(
+        &config.app_name,
+        label,
+        config.keychain_access_group.as_deref(),
+    ) {
         tracing::warn!(
             label = label,
             "keychain_delete failed during delete_key (harmless if the handle is already gone): {error}"

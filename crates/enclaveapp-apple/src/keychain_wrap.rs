@@ -389,6 +389,7 @@ pub(crate) fn keychain_load(
     app_name: &str,
     label: &str,
     cache_ttl: Duration,
+    access_group: Option<&str>,
 ) -> Result<Option<[u8; WRAP_KEY_LEN]>> {
     if let Some(cached) = cache_lookup(app_name, label, cache_ttl) {
         return Ok(Some(cached));
@@ -399,6 +400,17 @@ pub(crate) fn keychain_load(
     let account_bytes = label.as_bytes();
     let service_len = service_bytes.len() as i32;
     let account_len = account_bytes.len() as i32;
+    let (access_group_ptr, access_group_len) = match access_group {
+        Some(group) => {
+            let bytes = group.as_bytes();
+            let len = i32::try_from(bytes.len()).map_err(|_| Error::KeyOperation {
+                operation: "keychain_load".into(),
+                detail: "access group too long".into(),
+            })?;
+            (bytes.as_ptr(), len)
+        }
+        None => (std::ptr::null(), 0),
+    };
 
     let mut out = [0_u8; WRAP_KEY_LEN];
     let mut out_len: i32 = out.len() as i32;
@@ -410,6 +422,8 @@ pub(crate) fn keychain_load(
             account_len,
             out.as_mut_ptr(),
             &mut out_len,
+            access_group_ptr,
+            access_group_len,
         )
     };
     match rc {
@@ -478,7 +492,7 @@ pub fn generate_and_wrap(
         Ok(blob) => Ok(blob),
         Err(error) => {
             // Keep state consistent — remove the freshly-added entry.
-            drop(keychain_delete(app_name, label));
+            drop(keychain_delete(app_name, label, access_group));
             Err(error)
         }
     }
@@ -499,8 +513,9 @@ pub fn decrypt_with_cached_key(
     label: &str,
     blob: &[u8],
     cache_ttl: Duration,
+    access_group: Option<&str>,
 ) -> Result<Option<Vec<u8>>> {
-    match keychain_load(app_name, label, cache_ttl)? {
+    match keychain_load(app_name, label, cache_ttl, access_group)? {
         Some(wrapping_key) => {
             let plaintext = decrypt_blob(&wrapping_key, blob)?;
             Ok(Some(plaintext))
@@ -531,12 +546,12 @@ pub(crate) fn relabel_wrapping_key(
     }
     // Use `Duration::ZERO` so a rename always reads the live keychain
     // state — a cached value could be stale vs. a concurrent operation.
-    let wrapping_key =
-        keychain_load(app_name, old_label, Duration::ZERO)?.ok_or_else(|| Error::KeyNotFound {
+    let wrapping_key = keychain_load(app_name, old_label, Duration::ZERO, access_group)?
+        .ok_or_else(|| Error::KeyNotFound {
             label: old_label.to_string(),
         })?;
 
-    if keychain_load(app_name, new_label, Duration::ZERO)?.is_some() {
+    if keychain_load(app_name, new_label, Duration::ZERO, access_group)?.is_some() {
         return Err(Error::DuplicateLabel {
             label: new_label.to_string(),
         });
@@ -552,7 +567,7 @@ pub(crate) fn relabel_wrapping_key(
     // Best-effort removal of the old entry. A failure here leaves a
     // dangling old entry that `.handle` files no longer reference —
     // harmless and user-removable.
-    drop(keychain_delete(app_name, old_label));
+    drop(keychain_delete(app_name, old_label, access_group));
     Ok(())
     // `wrapping_key` drops here; `keychain_load`'s stack copy goes
     // away with it.
@@ -561,19 +576,37 @@ pub(crate) fn relabel_wrapping_key(
 /// Delete a wrapping-key entry from the login keychain and the
 /// process-local cache. Idempotent — "not found" is success so
 /// `delete_key` can clean up stale state without racing itself.
+///
+/// `access_group` mirrors `keychain_store` — when set, the Swift
+/// bridge sweeps both the Data Protection keychain (entitled-binary
+/// path) and the legacy keychain so a delete cleans up wrapping-key
+/// entries created by either binary generation.
 #[allow(unsafe_code)]
-pub fn keychain_delete(app_name: &str, label: &str) -> Result<()> {
+pub fn keychain_delete(app_name: &str, label: &str, access_group: Option<&str>) -> Result<()> {
     cache_evict(app_name, label);
 
     let service = service_name_for(app_name);
     let service_bytes = service.as_bytes();
     let account_bytes = label.as_bytes();
+    let (access_group_ptr, access_group_len) = match access_group {
+        Some(group) => {
+            let bytes = group.as_bytes();
+            let len = i32::try_from(bytes.len()).map_err(|_| Error::KeyOperation {
+                operation: "keychain_delete".into(),
+                detail: "access group too long".into(),
+            })?;
+            (bytes.as_ptr(), len)
+        }
+        None => (std::ptr::null(), 0),
+    };
     let rc = unsafe {
         ffi::enclaveapp_keychain_delete(
             service_bytes.as_ptr(),
             service_bytes.len() as i32,
             account_bytes.as_ptr(),
             account_bytes.len() as i32,
+            access_group_ptr,
+            access_group_len,
         )
     };
     // 12 = SE_ERR_KEYCHAIN_NOT_FOUND, which the Swift side now also
@@ -807,7 +840,7 @@ mod tests {
 
     impl Drop for KeychainEntryGuard {
         fn drop(&mut self) {
-            drop(keychain_delete(&self.app, &self.label));
+            drop(keychain_delete(&self.app, &self.label, None));
         }
     }
 
@@ -830,7 +863,7 @@ mod tests {
 
         let key = generate_wrapping_key();
         keychain_store(TEST_APP, &label, &key, false, None).unwrap();
-        let loaded = keychain_load(TEST_APP, &label, Duration::ZERO)
+        let loaded = keychain_load(TEST_APP, &label, Duration::ZERO, None)
             .unwrap()
             .unwrap();
         assert_eq!(loaded, key, "loaded wrapping key must equal stored");
@@ -840,7 +873,7 @@ mod tests {
     fn keychain_load_missing_returns_none() {
         let label = unique_test_label("missing");
         // No guard needed — we never stored anything.
-        let loaded = keychain_load(TEST_APP, &label, Duration::ZERO).unwrap();
+        let loaded = keychain_load(TEST_APP, &label, Duration::ZERO, None).unwrap();
         assert!(loaded.is_none(), "load of absent entry must return None");
     }
 
@@ -854,7 +887,7 @@ mod tests {
         keychain_store(TEST_APP, &label, &k1, false, None).unwrap();
         // Store again with a DIFFERENT key — should replace, not error.
         keychain_store(TEST_APP, &label, &k2, false, None).unwrap();
-        let loaded = keychain_load(TEST_APP, &label, Duration::ZERO)
+        let loaded = keychain_load(TEST_APP, &label, Duration::ZERO, None)
             .unwrap()
             .unwrap();
         assert_eq!(loaded, k2, "second store must overwrite first");
@@ -864,9 +897,9 @@ mod tests {
     fn keychain_delete_is_idempotent() {
         let label = unique_test_label("del-idem");
         // Delete without prior store — should succeed.
-        keychain_delete(TEST_APP, &label).unwrap();
+        keychain_delete(TEST_APP, &label, None).unwrap();
         // Delete again — still succeeds.
-        keychain_delete(TEST_APP, &label).unwrap();
+        keychain_delete(TEST_APP, &label, None).unwrap();
     }
 
     #[test]
@@ -876,12 +909,12 @@ mod tests {
 
         let key = generate_wrapping_key();
         keychain_store(TEST_APP, &label, &key, false, None).unwrap();
-        assert!(keychain_load(TEST_APP, &label, Duration::ZERO)
+        assert!(keychain_load(TEST_APP, &label, Duration::ZERO, None)
             .unwrap()
             .is_some());
-        keychain_delete(TEST_APP, &label).unwrap();
+        keychain_delete(TEST_APP, &label, None).unwrap();
         assert!(
-            keychain_load(TEST_APP, &label, Duration::ZERO)
+            keychain_load(TEST_APP, &label, Duration::ZERO, None)
                 .unwrap()
                 .is_none(),
             "load after delete must return None"
@@ -901,24 +934,24 @@ mod tests {
         keychain_store(TEST_APP, &label_a, &ka, false, None).unwrap();
         keychain_store(TEST_APP, &label_b, &kb, false, None).unwrap();
         assert_eq!(
-            keychain_load(TEST_APP, &label_a, Duration::ZERO)
+            keychain_load(TEST_APP, &label_a, Duration::ZERO, None)
                 .unwrap()
                 .unwrap(),
             ka
         );
         assert_eq!(
-            keychain_load(TEST_APP, &label_b, Duration::ZERO)
+            keychain_load(TEST_APP, &label_b, Duration::ZERO, None)
                 .unwrap()
                 .unwrap(),
             kb
         );
         // Deleting A does not affect B.
-        keychain_delete(TEST_APP, &label_a).unwrap();
-        assert!(keychain_load(TEST_APP, &label_a, Duration::ZERO)
+        keychain_delete(TEST_APP, &label_a, None).unwrap();
+        assert!(keychain_load(TEST_APP, &label_a, Duration::ZERO, None)
             .unwrap()
             .is_none());
         assert_eq!(
-            keychain_load(TEST_APP, &label_b, Duration::ZERO)
+            keychain_load(TEST_APP, &label_b, Duration::ZERO, None)
                 .unwrap()
                 .unwrap(),
             kb
@@ -939,13 +972,13 @@ mod tests {
         keychain_store(&app_x, &label, &kx, false, None).unwrap();
         keychain_store(&app_y, &label, &ky, false, None).unwrap();
         assert_eq!(
-            keychain_load(&app_x, &label, Duration::ZERO)
+            keychain_load(&app_x, &label, Duration::ZERO, None)
                 .unwrap()
                 .unwrap(),
             kx
         );
         assert_eq!(
-            keychain_load(&app_y, &label, Duration::ZERO)
+            keychain_load(&app_y, &label, Duration::ZERO, None)
                 .unwrap()
                 .unwrap(),
             ky
@@ -966,7 +999,7 @@ mod tests {
 
         // Now the real load path: get the wrapping key back from the
         // keychain and decrypt the blob.
-        let loaded_key = keychain_load(TEST_APP, &label, Duration::ZERO)
+        let loaded_key = keychain_load(TEST_APP, &label, Duration::ZERO, None)
             .unwrap()
             .unwrap();
         let recovered = decrypt_blob(&loaded_key, &wrapped).unwrap();
@@ -986,7 +1019,7 @@ mod tests {
         let wrapped = encrypt_blob(&real_key, b"secret").unwrap();
         let swapped_key = generate_wrapping_key();
         keychain_store(TEST_APP, &label, &swapped_key, false, None).unwrap();
-        let loaded_key = keychain_load(TEST_APP, &label, Duration::ZERO)
+        let loaded_key = keychain_load(TEST_APP, &label, Duration::ZERO, None)
             .unwrap()
             .unwrap();
         assert_ne!(loaded_key, real_key);

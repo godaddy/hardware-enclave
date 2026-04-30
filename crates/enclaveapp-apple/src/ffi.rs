@@ -110,6 +110,13 @@ extern "C" {
         access_group_len: i32,
     ) -> i32;
 
+    // `access_group` (UTF-8 pointer) + `access_group_len`: when non-null
+    // with len > 0, the bridge searches the Data Protection keychain
+    // (filtered by `kSecAttrAccessGroup`) first and falls back to the
+    // legacy keychain on NotFound. When null / 0, the legacy keychain
+    // is queried directly. Required for binaries that store wrapping
+    // keys via `enclaveapp_keychain_store` with an access group, so
+    // load can find what store wrote.
     pub fn enclaveapp_keychain_load(
         service: *const u8,
         service_len: i32,
@@ -117,12 +124,22 @@ extern "C" {
         account_len: i32,
         secret_out: *mut u8,
         secret_len: *mut i32,
+        access_group: *const u8,
+        access_group_len: i32,
     ) -> i32;
 
+    // `access_group` (UTF-8 pointer) + `access_group_len`: when non-null
+    // with len > 0, the bridge sweeps both DP and legacy keychains so
+    // the caller doesn't have to know which one a given item was
+    // stored in. Required so a delete on an upgraded binary cleans up
+    // both pre-upgrade (legacy) and post-upgrade (DP) entries for the
+    // same service+account.
     pub fn enclaveapp_keychain_delete(
         service: *const u8,
         service_len: i32,
         account: *const u8,
         account_len: i32,
+        access_group: *const u8,
+        access_group_len: i32,
     ) -> i32;
 }
