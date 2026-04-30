@@ -648,6 +648,18 @@ jobs:
           arm_sha=$(sha256sum "artifacts/${app}-aarch64-apple-darwin/${app}-aarch64-apple-darwin.tar.gz" | cut -d' ' -f1)
           intel_sha=$(sha256sum "artifacts/${app}-x86_64-apple-darwin/${app}-x86_64-apple-darwin.tar.gz" | cut -d' ' -f1)
 
+          # Linuxbrew support is opt-in by virtue of the consumer building
+          # an `x86_64-unknown-linux-gnu` artifact. When that tarball is
+          # present in the release, the formula gains an `on_linux` block;
+          # otherwise the formula stays macOS-only as before.
+          linux_artifact_path="artifacts/${app}-x86_64-unknown-linux-gnu/${app}-x86_64-unknown-linux-gnu.tar.gz"
+          linux_sha=""
+          ship_linux=0
+          if [ -f "$linux_artifact_path" ]; then
+            linux_sha=$(sha256sum "$linux_artifact_path" | cut -d' ' -f1)
+            ship_linux=1
+          fi
+
           git clone "https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/${tap_repo}.git" /tmp/tap
 
           # Pick the macOS binary list — falls back to unix_binaries
@@ -657,34 +669,58 @@ jobs:
             mac_binaries="${{ inputs.unix_binaries }}"
           fi
 
-          install_lines=""
+          # macOS install lines (run inside `if OS.mac?` block of the
+          # Ruby formula, so each line is indented one extra level
+          # relative to a top-level `def install`).
+          mac_install_lines=""
           if [ -n "$bundle_id" ]; then
-            # .app bundle mode — install the bundle into the formula
-            # prefix and symlink each CLI binary out of
-            # `Contents/MacOS/` into `bin/` so users continue to invoke
-            # `<app>` / `<app>-keygen` etc. directly from PATH.
-            install_lines="${install_lines}    prefix.install \"${app}.app\"\n"
+            mac_install_lines="${mac_install_lines}      prefix.install \"${app}.app\"\n"
             for bin in $mac_binaries; do
-              install_lines="${install_lines}    bin.install_symlink prefix/\"${app}.app/Contents/MacOS/${bin}\" => \"${bin}\"\n"
+              mac_install_lines="${mac_install_lines}      bin.install_symlink prefix/\"${app}.app/Contents/MacOS/${bin}\" => \"${bin}\"\n"
             done
           else
             for bin in $mac_binaries; do
-              install_lines="${install_lines}    bin.install \"${bin}\"\n"
+              mac_install_lines="${mac_install_lines}      bin.install \"${bin}\"\n"
             done
           fi
           extra='${{ inputs.extra_packaging }}'
           unix_libs=$(echo "$extra" | python3 -c "import sys,json; print(json.load(sys.stdin).get('unix_libs',''))" 2>/dev/null || echo "")
           for lib in $unix_libs; do
             case "$lib" in *.so) continue ;; esac
-            # In .app mode the .dylib is inside the bundle alongside
-            # the binaries; the symlink loop above doesn't cover it,
-            # but it's bundle-internal so consumers that link against
-            # it should DYLD_LIBRARY_PATH the bundle's MacOS dir or
-            # use a wrapper. For now, install loose-mode only.
             if [ -z "$bundle_id" ]; then
-              install_lines="${install_lines}    lib.install \"${lib}\"\n"
+              mac_install_lines="${mac_install_lines}      lib.install \"${lib}\"\n"
             fi
           done
+
+          # Linux install lines — installs the full `unix_binaries` set
+          # (Linux ships every binary, including stdio bridges that
+          # macOS skips) plus any `unix_libs` `.so` files.
+          linux_install_lines=""
+          for bin in ${{ inputs.unix_binaries }}; do
+            linux_install_lines="${linux_install_lines}      bin.install \"${bin}\"\n"
+          done
+          for lib in $unix_libs; do
+            case "$lib" in *.dylib) continue ;; esac
+            linux_install_lines="${linux_install_lines}      lib.install \"${lib}\"\n"
+          done
+
+          # Build the on_linux URL block (or empty string when the
+          # consumer doesn't ship a Linux artifact).
+          linux_url_block=""
+          if [ "$ship_linux" = 1 ]; then
+            linux_url_block=$(printf '\n  on_linux do\n    url "https://github.com/godaddy/%s/releases/download/%s/%s-x86_64-unknown-linux-gnu.tar.gz"\n    sha256 "%s"\n  end\n' "$app" "$tag" "$app" "$linux_sha")
+          fi
+
+          # Heredoc with leading-whitespace stripped by sed at the end.
+          # The `if OS.mac? ... else ... end` branch in the install
+          # method works as long as both arms have at least one
+          # statement. When ship_linux=0 the else arm is dead but
+          # still needs to be syntactically valid Ruby.
+          if [ "$ship_linux" = 1 ]; then
+            install_body=$(printf '    if OS.mac?\n%s    else\n%s    end' "$mac_install_lines" "$linux_install_lines")
+          else
+            install_body=$(printf '%s' "$mac_install_lines" | sed 's/^      /    /')
+          fi
 
           cat > /tmp/tap/Formula/${app}.rb << FORMULA
           class ${formula_class} < Formula
@@ -693,20 +729,21 @@ jobs:
             version "${version}"
             license "MIT"
 
-            on_arm do
-              url "https://github.com/godaddy/${app}/releases/download/${tag}/${app}-aarch64-apple-darwin.tar.gz"
-              sha256 "${arm_sha}"
-            end
+            on_macos do
+              on_arm do
+                url "https://github.com/godaddy/${app}/releases/download/${tag}/${app}-aarch64-apple-darwin.tar.gz"
+                sha256 "${arm_sha}"
+              end
 
-            on_intel do
-              url "https://github.com/godaddy/${app}/releases/download/${tag}/${app}-x86_64-apple-darwin.tar.gz"
-              sha256 "${intel_sha}"
-            end
-
-            depends_on :macos
+              on_intel do
+                url "https://github.com/godaddy/${app}/releases/download/${tag}/${app}-x86_64-apple-darwin.tar.gz"
+                sha256 "${intel_sha}"
+              end
+            end${linux_url_block}
 
             def install
-          $(echo -e "${install_lines}")    end
+          $(echo -e "${install_body}")
+            end
 
             test do
               assert_match "${app}", shell_output("\#{bin}/${app} --help 2>&1", 2)
@@ -714,6 +751,11 @@ jobs:
           end
           FORMULA
           sed -i 's/^          //' /tmp/tap/Formula/${app}.rb
+
+          # Sanity-check the generated Ruby parses before we push it.
+          if command -v ruby >/dev/null 2>&1; then
+            ruby -c /tmp/tap/Formula/${app}.rb
+          fi
 
           cd /tmp/tap
           git config user.name "github-actions[bot]"
