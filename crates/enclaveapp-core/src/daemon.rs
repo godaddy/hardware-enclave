@@ -90,16 +90,20 @@ impl std::fmt::Display for DaemonReadyError {
 impl std::error::Error for DaemonReadyError {}
 
 /// Exponential-backoff schedule used by [`ensure_daemon_ready`] when
-/// it has to wait for a freshly-spawned daemon. ≈10 s in aggregate
-/// before giving up — chosen to match `sshenc-agent`'s internal
-/// `wait_for_ready_file` timeout, so the outer caller doesn't give
-/// up before the inner daemonize machinery does. Slow CI runners
-/// (Linux containers under load, macOS notarization checks on first
-/// launch) can take several seconds for a fresh fork+exec to bind
-/// the socket; a 3 s budget produced flakes in production CI runs.
+/// it has to wait for a freshly-spawned daemon. ≈30 s in aggregate
+/// before giving up — generous enough to absorb cold-start spawn
+/// of the WSL → Windows TPM bridge. `sshenc-agent` on a fresh WSL
+/// shell on AlmaLinux musl was observed to take ~12 s to bind its
+/// socket because the agent has to spawn the
+/// `sshenc-tpm-bridge.exe` Windows process and complete an
+/// `init_signing` handshake before listening — a one-time cost per
+/// shell, not per request. The original 10 s budget cleared the
+/// glibc-on-Ubuntu cold-start path but flaked on AlmaLinux musl;
+/// the previous 3 s budget flaked even on Linux CI containers.
+///
 /// Unix only — the Windows stub doesn't spawn anything.
 #[cfg(unix)]
-const READINESS_BACKOFF_MS: &[u64] = &[50, 100, 200, 400, 800, 1600, 3000, 4000];
+const READINESS_BACKOFF_MS: &[u64] = &[50, 100, 200, 400, 800, 1600, 3000, 4000, 8000, 12000];
 
 /// Total timeout across the [`READINESS_BACKOFF_MS`] schedule. Used
 /// when reporting [`DaemonReadyError::NotReady`].
