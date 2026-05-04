@@ -172,7 +172,7 @@ pub(crate) fn decrypt_blob(wrapping_key: &[u8; WRAP_KEY_LEN], blob: &[u8]) -> Re
 /// given app. The account is the key `<label>` so every key gets its own
 /// wrapping-key entry.
 pub fn service_name_for(app_name: &str) -> String {
-    format!("com.libenclaveapp.{app_name}")
+    format!("com.godaddy.{app_name}")
 }
 
 // -----------------------------------------------------------------------
@@ -808,8 +808,8 @@ mod tests {
 
     #[test]
     fn service_name_matches_expected_format() {
-        assert_eq!(service_name_for("sshenc"), "com.libenclaveapp.sshenc");
-        assert_eq!(service_name_for("awsenc"), "com.libenclaveapp.awsenc");
+        assert_eq!(service_name_for("sshenc"), "com.godaddy.sshenc");
+        assert_eq!(service_name_for("awsenc"), "com.godaddy.awsenc");
     }
 
     // ───── Real-keychain integration tests (macOS only) ─────

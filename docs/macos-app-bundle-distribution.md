@@ -46,16 +46,16 @@ a workaround.
 
 ## Naming
 
-Per-consumer App IDs under a shared `com.libenclaveapp.*` prefix:
+Per-consumer App IDs under a shared `com.godaddy.*` prefix:
 
-| Consumer  | Bundle ID                       | Keychain access group                    |
-| --------- | ------------------------------- | ---------------------------------------- |
-| sshenc    | `com.libenclaveapp.sshenc`      | `<TEAMID>.com.libenclaveapp.sshenc`      |
-| awsenc    | `com.libenclaveapp.awsenc`      | `<TEAMID>.com.libenclaveapp.awsenc`      |
-| sso-jwt   | `com.libenclaveapp.sso-jwt`    | `<TEAMID>.com.libenclaveapp.sso-jwt`     |
-| npmenc    | `com.libenclaveapp.npmenc`      | `<TEAMID>.com.libenclaveapp.npmenc`      |
+| Consumer  | Bundle ID               | Keychain access group              |
+| --------- | ----------------------- | ---------------------------------- |
+| sshenc    | `com.godaddy.sshenc`    | `<TEAMID>.com.godaddy.sshenc`      |
+| awsenc    | `com.godaddy.awsenc`    | `<TEAMID>.com.godaddy.awsenc`      |
+| sso-jwt   | `com.godaddy.sso-jwt`   | `<TEAMID>.com.godaddy.sso-jwt`     |
+| npmenc    | `com.godaddy.npmenc`    | `<TEAMID>.com.godaddy.npmenc`      |
 
-For Jeremiah Gowdy's team, `<TEAMID>` is `W2YG5ZG9D6`.
+For the GoDaddy team, `<TEAMID>` is `7UMADG39Z9`.
 
 Per-app (not shared) so:
 
@@ -66,7 +66,7 @@ Per-app (not shared) so:
    would need cross-project coordination on every renewal.
 3. Matches the existing namespacing in
    `enclaveapp-apple/src/keychain_wrap.rs` where the keychain service
-   is `com.libenclaveapp.<app_name>`.
+   is `com.godaddy.<app_name>`.
 
 libenclaveapp itself does not need an App ID — it's a library, doesn't
 ship binaries.
@@ -90,20 +90,21 @@ to set one up).
 3. Choose **App IDs** → **App** → Continue.
 4. Description: `<consumer> — <one-line description>`
    (e.g. `sshenc — hardware-backed SSH key management`).
-5. Bundle ID: **Explicit**, value `com.libenclaveapp.<consumer>`
-   (e.g. `com.libenclaveapp.sshenc`).
-6. Capabilities: scroll to **Keychain Sharing**, check the box.
-7. Click **Edit / Configure** next to Keychain Sharing and add the
-   keychain group `com.libenclaveapp.<consumer>` (without the team
-   prefix — Apple adds that automatically when issuing the profile).
-8. Continue → Register.
+5. Bundle ID: **Explicit**, value `com.godaddy.<consumer>`
+   (e.g. `com.godaddy.sshenc`).
+6. Capabilities: leave everything unchecked. The Apple portal no
+   longer surfaces Keychain Sharing as an explicit capability for
+   App IDs; the team-prefix wildcard `<TEAMID>.*` in the Developer
+   ID profile (issued in step 2) covers any `keychain-access-groups`
+   claim with that prefix automatically.
+7. Continue → Register.
 
 ### Step 2 — create the provisioning profile
 
 1. Go to <https://developer.apple.com/account/resources/profiles/list>.
 2. Click **+** to add a new profile.
 3. Under **Distribution**, choose **Developer ID** → Continue.
-4. Select the App ID from step 1 (`com.libenclaveapp.<consumer>`)
+4. Select the App ID from step 1 (`com.godaddy.<consumer>`)
    → Continue.
 5. Select the **Developer ID Application** certificate → Continue.
 6. Profile name: `<consumer> Developer ID profile`
@@ -124,7 +125,7 @@ security cms -D -i ~/.appstoreconnect/profiles/<consumer>.provisionprofile
 ```
 
 Should print an XML plist whose `Entitlements` dict contains
-`keychain-access-groups: ["<TEAMID>.com.libenclaveapp.<consumer>"]`
+`keychain-access-groups: ["<TEAMID>.com.godaddy.<consumer>"]`
 and whose `TeamIdentifier` matches your team. If either is wrong, go
 back and recreate.
 
@@ -136,7 +137,7 @@ The reusable release workflow gains:
 
 | Input                    | Purpose                                                                                                                         |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
-| `macos_bundle_id`        | e.g. `com.libenclaveapp.sshenc`. Empty (default) skips the `.app` bundling path; binaries ship as a flat tarball as today.      |
+| `macos_bundle_id`        | e.g. `com.godaddy.sshenc`. Empty (default) skips the `.app` bundling path; binaries ship as a flat tarball as today.            |
 | `macos_binaries`         | Space-separated list of binaries to include in the macOS `.app`. Empty defaults to `unix_binaries`. Use to drop Linux-only      |
 |                          | binaries (e.g. tpm-bridge stdio servers) from the macOS tarball.                                                                |
 
@@ -187,7 +188,7 @@ Each consumer's `release.yml` adds three things:
 
 ```yaml
 with:
-  macos_bundle_id: "com.libenclaveapp.<consumer>"
+  macos_bundle_id: "com.godaddy.<consumer>"
   macos_binaries: "<consumer> <consumer>-foo <consumer>-bar"  # if differs from unix_binaries
 secrets:
   MACOS_PROVISIONING_PROFILE: ${{ secrets.MACOS_PROVISIONING_PROFILE }}
@@ -197,7 +198,7 @@ The consumer's Rust code (one line in the place that builds the
 `StorageConfig`) passes:
 
 ```rust
-keychain_access_group: Some("W2YG5ZG9D6.com.libenclaveapp.<consumer>".into()),
+keychain_access_group: Some("7UMADG39Z9.com.godaddy.<consumer>".into()),
 ```
 
 The consumer's entitlements plist (`installer/<consumer>.entitlements`)
@@ -206,7 +207,7 @@ declares the matching access group:
 ```xml
 <key>keychain-access-groups</key>
 <array>
-    <string>W2YG5ZG9D6.com.libenclaveapp.<consumer></string>
+    <string>7UMADG39Z9.com.godaddy.<consumer></string>
 </array>
 ```
 
@@ -236,7 +237,7 @@ signing pipeline uses.
 1. **libenclaveapp PR** — pipeline changes (this doc + the workflow
    updates). Lands first.
 2. **sshenc PR** — first consumer to opt in. Apple portal setup for
-   `com.libenclaveapp.sshenc`, secret upload, three-line `release.yml`
+   `com.godaddy.sshenc`, secret upload, three-line `release.yml`
    change, Rust + entitlements changes. Tag-driven release verifies
    end-to-end.
 3. **awsenc / sso-jwt / npmenc** — follow the same recipe once
