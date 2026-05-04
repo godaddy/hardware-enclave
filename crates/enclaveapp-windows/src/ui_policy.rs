@@ -254,8 +254,10 @@ mod tests {
     impl Drop for KeyGuard {
         fn drop(&mut self) {
             // Best-effort delete; ignore errors so a failed cleanup
-            // doesn't shadow the real test failure.
-            let _ = delete_key(TEST_APP, &self.label);
+            // doesn't shadow the real test failure. `let _ =` would
+            // trip the workspace's `let-underscore-drop` lint, so
+            // bind to a named ignore instead.
+            let _r = delete_key(TEST_APP, &self.label);
         }
     }
 
