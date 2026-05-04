@@ -59,8 +59,18 @@ impl EnclaveKeyManager for BridgeSignerWrapper {
         _key_type: enclaveapp_core::types::KeyType,
         _policy: enclaveapp_core::types::AccessPolicy,
     ) -> enclaveapp_core::Result<Vec<u8>> {
-        // Key generation happens via init_signing on the bridge side.
-        // Return the public key after init.
+        // Key generation happens via init_signing on the bridge side
+        // (it has load-or-create semantics). Explicitly call it
+        // first, then read the resulting public key. We can't rely
+        // on `self.public_key` to drive the create as a side effect
+        // anymore -- as of libenclaveapp PR #114 `bridge_public_key`
+        // is standalone and only reads existing keys.
+        enclaveapp_bridge::bridge_init_signing(
+            &self.bridge_path,
+            &self.app_name,
+            label,
+            self.access_policy,
+        )?;
         self.public_key(label)
     }
 

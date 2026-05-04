@@ -209,10 +209,16 @@ pub fn handle_request(
             }
         }
         "public_key" => {
-            let Some(ref s) = signing_storage else {
-                return BridgeResponse::error("signing not initialized: call init_signing first");
-            };
-            match s.public_key() {
+            // Standalone: doesn't require prior init_signing. The
+            // previous behaviour required clients to call init_signing
+            // first, which has create-if-missing semantics keyed by
+            // key_label (defaults to "default") -- so any read-only
+            // probe of a non-existent key created a `default` signing
+            // key as a side effect. Same fix shape as `list_keys`
+            // (libenclaveapp PR #110): a static `public_key_for_app`
+            // helper that just instantiates a TpmSigner without going
+            // through TpmSigningStorage::new's ensure_signing_key.
+            match TpmSigningStorage::public_key_for_app(app_name, key_label) {
                 Ok(pubkey) => BridgeResponse::success(&BASE64_STANDARD.encode(&pubkey)),
                 Err(e) => BridgeResponse::error(&format!("public_key failed: {e}")),
             }
@@ -1007,13 +1013,22 @@ mod tests {
 
     #[test]
     fn handle_public_key_without_init_signing() {
+        // public_key is now standalone (parallel of list_keys, see PR
+        // #110 commentary). Pre-fix it required init_signing first,
+        // which created a key with the configured key_label as a side
+        // effect of every read. The handler now uses
+        // TpmSigningStorage::public_key_for_app, which takes both
+        // app_name and key_label and returns KeyNotFound when the key
+        // doesn't exist (instead of creating it).
         let req = make_request("public_key", "", AccessPolicy::None);
         let mut signing_storage = None;
         let resp = handle_signing(&req, &mut signing_storage);
-        assert!(resp
-            .error
-            .as_deref()
-            .is_some_and(|e| e.contains("signing not initialized")),);
+        if let Some(err) = &resp.error {
+            assert!(
+                !err.contains("signing not initialized"),
+                "public_key should be standalone, not require init_signing: {err}"
+            );
+        }
     }
 
     #[test]

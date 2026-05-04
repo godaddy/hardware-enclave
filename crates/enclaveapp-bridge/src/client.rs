@@ -593,7 +593,22 @@ pub fn bridge_sign(
     response.decode_result("bridge_sign")
 }
 
-/// Convenience: get the public key via the bridge.
+/// Read the public key for an existing (app_name, key_label) pair
+/// via the bridge. Standalone: does NOT prefix with `init_signing`.
+///
+/// Callers that need create-if-missing semantics (e.g. keygen) should
+/// invoke `bridge_init_signing` explicitly first, then call this to
+/// fetch the resulting public key. Read-only callers (e.g. agent
+/// identity enumeration, sshenc-se's proxy fetching pubkey bytes for
+/// a known label) get a clean read with no side effect; if the key
+/// is missing, the bridge surfaces the underlying `KeyNotFound`
+/// shape rather than silently creating it.
+///
+/// History: paired with `bridge_list_keys` becoming standalone
+/// (libenclaveapp PR #110), this finishes off the
+/// `call_bridge_after_signing_init` audit -- of the public bridge
+/// helpers, only `bridge_sign` legitimately needs the init prelude
+/// (signing requires a real key for the given label).
 pub fn bridge_public_key(
     bridge_path: &Path,
     app_name: &str,
@@ -609,8 +624,7 @@ pub fn bridge_public_key(
             key_label.to_string(),
         ),
     };
-    let response =
-        call_bridge_after_signing_init(bridge_path, app_name, key_label, access_policy, &request)?;
+    let response = call_bridge(bridge_path, &request)?;
     response.decode_result("bridge_public_key")
 }
 
@@ -1514,16 +1528,21 @@ esac
 
     #[cfg(unix)]
     #[test]
-    fn bridge_public_key_initializes_before_requesting() {
+    fn bridge_public_key_is_standalone() {
+        // Locks in the new contract (parallel of bridge_list_keys
+        // becoming standalone in PR #110): bridge_public_key no
+        // longer prefixes the request with init_signing. The
+        // previous "initializes before requesting" behaviour was
+        // the source of read-only callers (sshenc-se's proxy
+        // fetching pubkey bytes for an unknown label, the agent's
+        // identity-enumeration during a list-keys cache miss)
+        // silently creating a "default" signing key as a side
+        // effect of every read. Mock script reads exactly one line
+        // and replies with a public_key-shaped result.
         let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
         let script = temp_script(
             "pubkey.sh",
             r#"#!/bin/sh
-read init_line
-case "$init_line" in
-  *'"method":"init_signing"'*) printf '{"result":"","error":null}\n' ;;
-  *) printf '{"result":null,"error":"unexpected init request"}\n'; exit 0 ;;
-esac
 read request_line
 case "$request_line" in
   *'"method":"public_key"'*) printf '{"result":"cHVia2V5","error":null}\n' ;;

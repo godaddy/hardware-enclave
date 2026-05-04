@@ -215,6 +215,23 @@ mod platform {
             signer.list_keys().map_err(|e| e.to_string())
         }
 
+        /// Read the public key for an existing (app_name, key_label)
+        /// pair without `init_signing`. Same shape as the
+        /// `list_keys_for_app` standalone helper added in libenclaveapp
+        /// PR #110: lets the bridge server respond to a `public_key`
+        /// request without going through TpmSigningStorage::new (which
+        /// has create-if-missing semantics). If the key doesn't exist,
+        /// the underlying `TpmSigner::public_key` returns
+        /// `Error::KeyNotFound`, which is the right shape for clients
+        /// to handle.
+        pub fn public_key_for_app(app_name: &str, key_label: &str) -> Result<Vec<u8>, String> {
+            let signer = TpmSigner::new(app_name);
+            if !signer.is_available() {
+                return Err("TPM not available".to_string());
+            }
+            signer.public_key(key_label).map_err(|e| e.to_string())
+        }
+
         pub fn delete(app_name: &str, key_label: &str) -> Result<(), String> {
             let signer = TpmSigner::new(app_name);
 
@@ -323,6 +340,10 @@ mod platform {
         }
 
         pub fn list_keys_for_app(_app_name: &str) -> Result<Vec<String>, String> {
+            Err("TPM signing bridge is only supported on Windows".to_string())
+        }
+
+        pub fn public_key_for_app(_app_name: &str, _key_label: &str) -> Result<Vec<u8>, String> {
             Err("TPM signing bridge is only supported on Windows".to_string())
         }
 
