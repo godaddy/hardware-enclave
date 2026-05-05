@@ -67,19 +67,82 @@ private var lacontextRegistry: [UInt64: LAContext] = [:]
 private var lacontextNextToken: UInt64 = 0
 
 /// Create a new LAContext with the given Touch ID reuse duration in
-/// seconds and register it under a fresh token. Returns the token
-/// (always > 0) on success, or 0 on failure.
+/// seconds, **explicitly authenticate it via `evaluatePolicy`**, and
+/// register it under a fresh token. Returns the token (always > 0)
+/// on success, or 0 if the user cancelled / authentication failed.
 ///
-/// The context is *not* pre-authenticated. The first SE sign that
-/// receives this token will trigger the user-presence prompt; signs
-/// within `ttl_secs` after that will reuse the authentication and
-/// skip the prompt.
+/// Why we authenticate up front instead of letting CryptoKit's
+/// implicit SE prompt do it: with a `userPresence`-ACL'd SE key,
+/// passing an unauthenticated LAContext to
+/// `SecureEnclave.P256.Signing.PrivateKey(... authenticationContext:)`
+/// does NOT make subsequent signs reuse a single authentication --
+/// CryptoKit prompts on every sign, ignoring the reuse duration on
+/// the LAContext. The reuse window only kicks in for signs that
+/// follow an *explicit* `evaluatePolicy` on the LAContext. So we
+/// prompt once here, mark the LAContext as authenticated, and from
+/// then on the SE accepts signs from this LAContext silently for
+/// `ttl_secs` -- which is the UX users actually expect ("I tap Touch
+/// ID once and the agent handles the burst of signs in the next 5
+/// minutes silently").
+///
+/// `ttl_secs == 0` collapses to "must re-auth every time" (no reuse
+/// window). Apple caps the effective reuse at
+/// `LATouchIDAuthenticationMaximumAllowableReuseDuration` (300s) for
+/// Touch ID; values higher than that are silently clamped.
 @_cdecl("enclaveapp_se_lacontext_create")
 public func enclaveapp_se_lacontext_create(_ ttl_secs: Double) -> UInt64 {
     let ctx = LAContext()
-    // 0 here is treated by Apple as "must re-authenticate every time" —
-    // equivalent to no reuse. We honour that.
     ctx.touchIDAuthenticationAllowableReuseDuration = max(0.0, ttl_secs)
+
+    // `canEvaluatePolicy` rejects the call with an explicit error
+    // before showing UI if the device has no enrolled biometrics /
+    // passcode. Without this guard, `evaluatePolicy` on a freshly-
+    // imaged Mac with no enrolled Touch ID throws an error that
+    // surfaces as "create returned 0" with no diagnostic.
+    var canEvalError: NSError?
+    if !ctx.canEvaluatePolicy(.deviceOwnerAuthentication, error: &canEvalError) {
+        FileHandle.standardError.write(
+            ("enclaveapp: lacontext_create: device cannot evaluate "
+             + ".deviceOwnerAuthentication policy: "
+             + (canEvalError?.localizedDescription ?? "unknown") + "\n").data(using: .utf8)!
+        )
+        return 0
+    }
+
+    // Synchronously authenticate the LAContext. `evaluatePolicy` is
+    // async; bridge to a synchronous return via a semaphore so the
+    // C ABI caller (which expects a return value, not a callback)
+    // gets a deterministic outcome.
+    let semaphore = DispatchSemaphore(value: 0)
+    var authed = false
+    ctx.evaluatePolicy(
+        .deviceOwnerAuthentication,
+        localizedReason: "sshenc agent: authenticate to use your Secure Enclave keys"
+    ) { success, evalError in
+        authed = success
+        if !success, let err = evalError {
+            // Errors that aren't "user cancelled" deserve a log line so
+            // a user with a misconfigured biometric/passcode setup can
+            // see *why* their LAContext keeps failing. User cancel is
+            // expected and quiet.
+            let nsErr = err as NSError
+            if nsErr.code != LAError.userCancel.rawValue
+                && nsErr.code != LAError.appCancel.rawValue
+                && nsErr.code != LAError.systemCancel.rawValue
+            {
+                FileHandle.standardError.write(
+                    ("enclaveapp: lacontext_create: evaluatePolicy failed: "
+                     + nsErr.localizedDescription + "\n").data(using: .utf8)!
+                )
+            }
+        }
+        semaphore.signal()
+    }
+    semaphore.wait()
+
+    if !authed {
+        return 0
+    }
 
     lacontextLock.lock()
     defer { lacontextLock.unlock() }
