@@ -384,12 +384,18 @@ pub(crate) fn keychain_store(
 /// wrapping key — external callers must go through
 /// [`decrypt_with_cached_key`] instead, which never exposes the key
 /// outside this module.
+///
+/// `lacontext_token` (sentinel `0` = none) is passed to the bridge so
+/// `userPresence`-protected entries can reuse a previously-authenticated
+/// LAContext instead of triggering an independent biometric prompt at
+/// keychain-decrypt time. See the FFI declaration for details.
 #[allow(unsafe_code)]
 pub(crate) fn keychain_load(
     app_name: &str,
     label: &str,
     cache_ttl: Duration,
     access_group: Option<&str>,
+    lacontext_token: u64,
 ) -> Result<Option<[u8; WRAP_KEY_LEN]>> {
     if let Some(cached) = cache_lookup(app_name, label, cache_ttl) {
         return Ok(Some(cached));
@@ -424,6 +430,7 @@ pub(crate) fn keychain_load(
             &mut out_len,
             access_group_ptr,
             access_group_len,
+            lacontext_token,
         )
     };
     match rc {
@@ -514,8 +521,9 @@ pub fn decrypt_with_cached_key(
     blob: &[u8],
     cache_ttl: Duration,
     access_group: Option<&str>,
+    lacontext_token: u64,
 ) -> Result<Option<Vec<u8>>> {
-    match keychain_load(app_name, label, cache_ttl, access_group)? {
+    match keychain_load(app_name, label, cache_ttl, access_group, lacontext_token)? {
         Some(wrapping_key) => {
             let plaintext = decrypt_blob(&wrapping_key, blob)?;
             Ok(Some(plaintext))
@@ -546,12 +554,14 @@ pub(crate) fn relabel_wrapping_key(
     }
     // Use `Duration::ZERO` so a rename always reads the live keychain
     // state — a cached value could be stale vs. a concurrent operation.
-    let wrapping_key = keychain_load(app_name, old_label, Duration::ZERO, access_group)?
+    // No LAContext: rename is an interactive op where the user is
+    // already expected to authenticate.
+    let wrapping_key = keychain_load(app_name, old_label, Duration::ZERO, access_group, 0)?
         .ok_or_else(|| Error::KeyNotFound {
             label: old_label.to_string(),
         })?;
 
-    if keychain_load(app_name, new_label, Duration::ZERO, access_group)?.is_some() {
+    if keychain_load(app_name, new_label, Duration::ZERO, access_group, 0)?.is_some() {
         return Err(Error::DuplicateLabel {
             label: new_label.to_string(),
         });
@@ -863,7 +873,7 @@ mod tests {
 
         let key = generate_wrapping_key();
         keychain_store(TEST_APP, &label, &key, false, None).unwrap();
-        let loaded = keychain_load(TEST_APP, &label, Duration::ZERO, None)
+        let loaded = keychain_load(TEST_APP, &label, Duration::ZERO, None, 0)
             .unwrap()
             .unwrap();
         assert_eq!(loaded, key, "loaded wrapping key must equal stored");
@@ -873,7 +883,7 @@ mod tests {
     fn keychain_load_missing_returns_none() {
         let label = unique_test_label("missing");
         // No guard needed — we never stored anything.
-        let loaded = keychain_load(TEST_APP, &label, Duration::ZERO, None).unwrap();
+        let loaded = keychain_load(TEST_APP, &label, Duration::ZERO, None, 0).unwrap();
         assert!(loaded.is_none(), "load of absent entry must return None");
     }
 
@@ -887,7 +897,7 @@ mod tests {
         keychain_store(TEST_APP, &label, &k1, false, None).unwrap();
         // Store again with a DIFFERENT key — should replace, not error.
         keychain_store(TEST_APP, &label, &k2, false, None).unwrap();
-        let loaded = keychain_load(TEST_APP, &label, Duration::ZERO, None)
+        let loaded = keychain_load(TEST_APP, &label, Duration::ZERO, None, 0)
             .unwrap()
             .unwrap();
         assert_eq!(loaded, k2, "second store must overwrite first");
@@ -909,12 +919,12 @@ mod tests {
 
         let key = generate_wrapping_key();
         keychain_store(TEST_APP, &label, &key, false, None).unwrap();
-        assert!(keychain_load(TEST_APP, &label, Duration::ZERO, None)
+        assert!(keychain_load(TEST_APP, &label, Duration::ZERO, None, 0)
             .unwrap()
             .is_some());
         keychain_delete(TEST_APP, &label, None).unwrap();
         assert!(
-            keychain_load(TEST_APP, &label, Duration::ZERO, None)
+            keychain_load(TEST_APP, &label, Duration::ZERO, None, 0)
                 .unwrap()
                 .is_none(),
             "load after delete must return None"
@@ -934,24 +944,24 @@ mod tests {
         keychain_store(TEST_APP, &label_a, &ka, false, None).unwrap();
         keychain_store(TEST_APP, &label_b, &kb, false, None).unwrap();
         assert_eq!(
-            keychain_load(TEST_APP, &label_a, Duration::ZERO, None)
+            keychain_load(TEST_APP, &label_a, Duration::ZERO, None, 0)
                 .unwrap()
                 .unwrap(),
             ka
         );
         assert_eq!(
-            keychain_load(TEST_APP, &label_b, Duration::ZERO, None)
+            keychain_load(TEST_APP, &label_b, Duration::ZERO, None, 0)
                 .unwrap()
                 .unwrap(),
             kb
         );
         // Deleting A does not affect B.
         keychain_delete(TEST_APP, &label_a, None).unwrap();
-        assert!(keychain_load(TEST_APP, &label_a, Duration::ZERO, None)
+        assert!(keychain_load(TEST_APP, &label_a, Duration::ZERO, None, 0)
             .unwrap()
             .is_none());
         assert_eq!(
-            keychain_load(TEST_APP, &label_b, Duration::ZERO, None)
+            keychain_load(TEST_APP, &label_b, Duration::ZERO, None, 0)
                 .unwrap()
                 .unwrap(),
             kb
@@ -972,13 +982,13 @@ mod tests {
         keychain_store(&app_x, &label, &kx, false, None).unwrap();
         keychain_store(&app_y, &label, &ky, false, None).unwrap();
         assert_eq!(
-            keychain_load(&app_x, &label, Duration::ZERO, None)
+            keychain_load(&app_x, &label, Duration::ZERO, None, 0)
                 .unwrap()
                 .unwrap(),
             kx
         );
         assert_eq!(
-            keychain_load(&app_y, &label, Duration::ZERO, None)
+            keychain_load(&app_y, &label, Duration::ZERO, None, 0)
                 .unwrap()
                 .unwrap(),
             ky
@@ -999,7 +1009,7 @@ mod tests {
 
         // Now the real load path: get the wrapping key back from the
         // keychain and decrypt the blob.
-        let loaded_key = keychain_load(TEST_APP, &label, Duration::ZERO, None)
+        let loaded_key = keychain_load(TEST_APP, &label, Duration::ZERO, None, 0)
             .unwrap()
             .unwrap();
         let recovered = decrypt_blob(&loaded_key, &wrapped).unwrap();
@@ -1019,7 +1029,7 @@ mod tests {
         let wrapped = encrypt_blob(&real_key, b"secret").unwrap();
         let swapped_key = generate_wrapping_key();
         keychain_store(TEST_APP, &label, &swapped_key, false, None).unwrap();
-        let loaded_key = keychain_load(TEST_APP, &label, Duration::ZERO, None)
+        let loaded_key = keychain_load(TEST_APP, &label, Duration::ZERO, None, 0)
             .unwrap()
             .unwrap();
         assert_ne!(loaded_key, real_key);

@@ -408,6 +408,21 @@ pub fn rename_key(config: &KeychainConfig, old_label: &str, new_label: &str) -> 
 /// migration — they'll be re-wrapped the next time `generate_and_save_key`
 /// replaces the label.
 pub fn load_handle(config: &KeychainConfig, label: &str) -> Result<Vec<u8>> {
+    load_handle_with_context(config, label, 0)
+}
+
+/// Variant of [`load_handle`] that threads a registered `LAContext`
+/// token into the wrapping-key keychain query so a previously-
+/// authenticated context covers the keychain decrypt without an
+/// independent biometric prompt. Pass token `0` for the legacy
+/// "no context, prompt independently if userPresence-protected"
+/// behaviour. Used by the sign path so a single `evaluatePolicy`
+/// covers both the keychain decrypt and the SE sign that follows.
+pub fn load_handle_with_context(
+    config: &KeychainConfig,
+    label: &str,
+    lacontext_token: u64,
+) -> Result<Vec<u8>> {
     validate_label(label)?;
     let path = config.keys_dir().join(format!("{label}.handle"));
     if !path.exists() {
@@ -434,6 +449,7 @@ pub fn load_handle(config: &KeychainConfig, label: &str) -> Result<Vec<u8>> {
         &contents,
         config.wrapping_key_cache_ttl,
         config.keychain_access_group.as_deref(),
+        lacontext_token,
     )? {
         Some(plaintext) => Ok(plaintext),
         None => Err(Error::KeyOperation {

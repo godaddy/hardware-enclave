@@ -41,10 +41,17 @@ impl SecureEnclaveSigner {
     /// Internal sign-with-token routine. `lacontext_token == 0` means
     /// "no reusable context; SEP enforces a prompt per sign." Non-zero
     /// is a token returned from the Swift LAContext registry.
+    ///
+    /// The same token is threaded into `keychain::load_handle_with_context`
+    /// so the keychain decrypt of the wrapping-key entry reuses the
+    /// LAContext's auth instead of issuing an independent prompt.
+    /// Without this, a single sign produced two prompts on userPresence-
+    /// protected wrapping keys: one for the keychain decrypt, one for
+    /// the SE sign itself.
     #[allow(unsafe_code)] // FFI call to CryptoKit Swift bridge
     fn sign_inner(&self, label: &str, data: &[u8], lacontext_token: u64) -> Result<Vec<u8>> {
         validate_label(label)?;
-        let data_rep = keychain::load_handle(&self.config, label)?;
+        let data_rep = keychain::load_handle_with_context(&self.config, label, lacontext_token)?;
 
         let mut sig = vec![0_u8; 128]; // DER ECDSA P-256 sig is at most ~72 bytes
         let mut sig_len: i32 = 128;

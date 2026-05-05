@@ -117,6 +117,13 @@ extern "C" {
     // is queried directly. Required for binaries that store wrapping
     // keys via `enclaveapp_keychain_store` with an access group, so
     // load can find what store wrote.
+    //
+    // `lacontext_token`: when non-zero, the bridge passes the registered
+    // LAContext via `kSecUseAuthenticationContext`. If that LAContext
+    // has a recent successful `evaluatePolicy` (which is what the
+    // sshenc agent's sign path arranges) the keychain reuses that auth
+    // for `userPresence`-protected items, suppressing the per-call
+    // biometric prompt. Token `0` is "no context, prompt independently."
     pub fn enclaveapp_keychain_load(
         service: *const u8,
         service_len: i32,
@@ -126,6 +133,7 @@ extern "C" {
         secret_len: *mut i32,
         access_group: *const u8,
         access_group_len: i32,
+        lacontext_token: u64,
     ) -> i32;
 
     // `access_group` (UTF-8 pointer) + `access_group_len`: when non-null

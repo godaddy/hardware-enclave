@@ -924,12 +924,23 @@ public func enclaveapp_keychain_store(
 
 /// Load a previously-stored secret by service+account. Returns
 /// `SE_ERR_KEYCHAIN_NOT_FOUND` if no entry exists.
+///
+/// `lacontext_token` plumbs an already-authenticated `LAContext` into
+/// the keychain query via `kSecUseAuthenticationContext`. When the
+/// stored item is `userPresence`-protected and the LAContext has a
+/// recent successful `evaluatePolicy` (which is what
+/// `enclaveapp_se_lacontext_create` does), `SecItemCopyMatching`
+/// reuses that authentication and skips the biometric prompt -- so a
+/// single user prompt covers both the wrapping-key keychain decrypt
+/// and the subsequent SE sign. Token `0` is the sentinel for "no
+/// context, prompt independently if the item is presence-protected".
 @_cdecl("enclaveapp_keychain_load")
 public func enclaveapp_keychain_load(
     _ service: UnsafePointer<UInt8>, _ service_len: Int32,
     _ account: UnsafePointer<UInt8>, _ account_len: Int32,
     _ secret_out: UnsafeMutablePointer<UInt8>, _ secret_len: UnsafeMutablePointer<Int32>,
-    _ access_group: UnsafePointer<UInt8>?, _ access_group_len: Int32
+    _ access_group: UnsafePointer<UInt8>?, _ access_group_len: Int32,
+    _ lacontext_token: UInt64
 ) -> Int32 {
     return traceDuration("keychain_load") {
         guard let serviceStr = makeServiceString(service, service_len) else {
@@ -944,6 +955,8 @@ public func enclaveapp_keychain_load(
         return makeUtf8String(ptr, access_group_len)
     }()
 
+    let authContext: LAContext? = lacontextLookup(lacontext_token)
+
     // Helper that performs a SecItemCopyMatching with the given keychain
     // routing options and copies the result into the caller's buffer.
     // Returns the SE_* result code (or `nil` on errSecItemNotFound,
@@ -957,6 +970,9 @@ public func enclaveapp_keychain_load(
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
+        if let ctx = authContext {
+            query[kSecUseAuthenticationContext as String] = ctx
+        }
         if useDP {
             query[kSecUseDataProtectionKeychain as String] = true
             if let group = accessGroup {
