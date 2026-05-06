@@ -263,23 +263,41 @@ impl AppEncryptionStorage {
         expected_policy: AccessPolicy,
     ) -> Result<()> {
         if encryptor.public_key(&config.key_label).is_ok() {
+            // Don't reach into the platform secure store unless there's
+            // actually a `.meta` file to verify. Same rationale as
+            // `platform::verify_meta_integrity` — keeps test binaries
+            // and synthetic probe paths off the macOS Keychain ACL
+            // prompt path.
+            let meta_path = keys_dir.join(format!("{}.meta", config.key_label));
+            let meta_exists = meta_path.exists();
             // Key exists — verify the `.meta.hmac` sidecar first when a
-            // per-app meta-HMAC key is available in the system keyring
-            // (Linux / keyring backend only). A HMAC mismatch is a hard
-            // failure: someone rewrote `.meta` after save, so we don't
-            // trust any stored policy and refuse to proceed.
+            // per-app meta-HMAC key is available from the platform's
+            // secure store (macOS Keychain, Windows DPAPI, Linux Secret
+            // Service). A HMAC mismatch is a hard failure: someone
+            // rewrote `.meta` after save, so we don't trust any stored
+            // policy and refuse to proceed.
             //
             // A *missing* sidecar in strict mode is also a hard error
-            // — that's exactly the threat model promise the sidecar
-            // is making ("attacker without keyring access is caught").
-            // We do allow a one-shot upgrade for caches written by
-            // pre-strict-mode versions: if the sidecar is missing,
-            // log a warning and migrate it from the current meta so
-            // subsequent loads are strict. The migration "blesses"
-            // whatever meta is on disk at first load after upgrade,
-            // which is an inherent property of any HMAC migration.
-            #[cfg(target_os = "linux")]
-            if let Some(hmac_key) = enclaveapp_keyring::meta_hmac_key(&config.app_name) {
+            // — that's exactly the threat-model promise the sidecar
+            // is making ("attacker without secure-store access is
+            // caught"). We allow a one-shot upgrade for caches
+            // written by pre-strict-mode versions: if the sidecar is
+            // missing, log a warning and migrate it from the current
+            // meta so subsequent loads are strict. The migration
+            // "blesses" whatever meta is on disk at first load after
+            // upgrade — an inherent property of any HMAC migration.
+            //
+            // The dispatch lives in
+            // `enclaveapp_app_storage::platform::meta_hmac_key`
+            // which fans out per-platform. `None` returns mean the
+            // platform store is unreachable; in that case we skip
+            // the verification rather than refusing to proceed,
+            // matching the legacy "Linux without Secret Service"
+            // behavior.
+            if let Some(hmac_key) = meta_exists
+                .then(|| crate::platform::meta_hmac_key(&config.app_name))
+                .flatten()
+            {
                 let strict = metadata::load_meta_with_hmac(
                     keys_dir,
                     &config.key_label,
