@@ -16,6 +16,8 @@ mod export;
 #[cfg(target_os = "windows")]
 mod key;
 #[cfg(target_os = "windows")]
+pub mod meta_hmac;
+#[cfg(target_os = "windows")]
 mod provider;
 #[cfg(target_os = "windows")]
 pub mod ui_policy;

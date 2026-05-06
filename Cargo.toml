@@ -66,7 +66,7 @@ aes-gcm = "0.10"
 elliptic-curve = { version = "0.13", features = ["sec1"] }
 
 # Windows
-windows = { version = "0.58", features = ["Win32_Security", "Win32_Security_Cryptography", "Win32_Foundation", "Win32_System_Threading", "Win32_System_SystemServices"] }
+windows = { version = "0.58", features = ["Win32_Security", "Win32_Security_Cryptography", "Win32_Foundation", "Win32_System_Threading", "Win32_System_SystemServices", "Win32_System_Memory"] }
 
 # Linux TPM
 tss-esapi = "7"
