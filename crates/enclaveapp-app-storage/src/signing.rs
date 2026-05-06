@@ -224,7 +224,17 @@ impl AppSigningBackend {
 
     #[cfg(target_os = "linux")]
     fn init_linux(config: &StorageConfig) -> Result<Self> {
-        // Try hardware TPM first, fall back to software.
+        use crate::backend_marker;
+
+        // Sticky backend marker: if a previous successful init
+        // recorded `Tpm` here, refuse to silently downgrade to
+        // keyring just because `is_available()` returned `false` on
+        // this run (transient TPM hiccup, daemon restart, etc.).
+        // The keyring path can't sign with TPM keys, so the silent
+        // downgrade would surface as a confusing "key not found"
+        // error far away from the real cause.
+        let prior = backend_marker::read(&config.app_name).ok().flatten();
+
         #[cfg(target_env = "gnu")]
         if enclaveapp_linux_tpm::is_available() {
             let keys_dir = config
@@ -234,13 +244,32 @@ impl AppSigningBackend {
             let signer =
                 enclaveapp_linux_tpm::LinuxTpmSigner::with_keys_dir(&config.app_name, keys_dir);
             debug!("Linux TPM signing backend ready (app={})", config.app_name);
+            // Best-effort marker write — losing this is not a hard
+            // failure. The next successful init will write it again.
+            drop(backend_marker::write(&config.app_name, BackendKind::Tpm));
             return Ok(Self {
                 kind: BackendKind::Tpm,
                 inner: SigningInner::LinuxTpm(signer),
             });
         }
 
-        Self::init_linux_keyring(config)
+        if matches!(prior, Some(BackendKind::Tpm)) {
+            return Err(StorageError::KeyInitFailed(format!(
+                "TPM backend was used previously for app {} but is no longer available; \
+                 refusing to silently downgrade to the keyring backend (TPM keys can't be \
+                 used by it). Restore TPM access (check tcsd / tpm2-abrmd / kernel module) \
+                 or, if you are intentionally migrating away from TPM, delete \
+                 {} and regenerate the affected keys.",
+                config.app_name,
+                enclaveapp_core::metadata::config_dir(&config.app_name)
+                    .join(".backend")
+                    .display()
+            )));
+        }
+
+        let backend = Self::init_linux_keyring(config)?;
+        drop(backend_marker::write(&config.app_name, backend.kind));
+        Ok(backend)
     }
 
     #[cfg(target_os = "linux")]

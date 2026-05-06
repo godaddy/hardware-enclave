@@ -53,6 +53,8 @@
 //! # Ok::<(), enclaveapp_app_storage::StorageError>(())
 //! ```
 
+#[cfg(target_os = "linux")]
+mod backend_marker;
 pub mod encryption;
 pub mod error;
 #[cfg(feature = "mock")]
