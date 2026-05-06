@@ -264,7 +264,13 @@ impl BridgeSession {
 
         Ok(Self {
             child,
-            reader: LineReaderWithTimeout::new(stdout),
+            // The bridge is across a process boundary and may be
+            // compromised or buggy; cap the per-line read at
+            // MAX_BRIDGE_RESPONSE_BYTES so a malicious peer can't
+            // drive unbounded heap allocation by withholding the
+            // newline. The reader returns InvalidData if the cap is
+            // hit before the terminator.
+            reader: LineReaderWithTimeout::with_max_line_bytes(stdout, MAX_BRIDGE_RESPONSE_BYTES),
             finished: false,
             request_timeout: bridge_request_timeout(),
         })
@@ -281,7 +287,29 @@ impl BridgeSession {
 
         let line = match self.reader.recv_line(self.request_timeout) {
             TimeoutResult::Completed(Ok(line)) => line,
-            TimeoutResult::Completed(Err(e)) => return Err(enclaveapp_core::Error::Io(e)),
+            TimeoutResult::Completed(Err(e)) => {
+                // Kill the child on read errors too — the most common
+                // case is the bounded reader's InvalidData cap-hit,
+                // which means the bridge is misbehaving and the
+                // session is unrecoverable. Surface it as a typed
+                // KeyOperation so the operator sees the size cap in
+                // the error rather than a raw io::Error chain.
+                let cap_hit = e.kind() == std::io::ErrorKind::InvalidData;
+                drop(self.child.kill());
+                drop(self.child.wait());
+                self.finished = true;
+                return if cap_hit {
+                    Err(enclaveapp_core::Error::KeyOperation {
+                        operation: "bridge_read".into(),
+                        detail: format!(
+                            "bridge response exceeded {MAX_BRIDGE_RESPONSE_BYTES}-byte cap \
+                             before newline ({e})"
+                        ),
+                    })
+                } else {
+                    Err(enclaveapp_core::Error::Io(e))
+                };
+            }
             TimeoutResult::TimedOut => {
                 // Kill the child so we're not leaving a stuck TPM op running.
                 drop(self.child.kill());
@@ -296,13 +324,6 @@ impl BridgeSession {
                 });
             }
         };
-
-        if line.len() > MAX_BRIDGE_RESPONSE_BYTES {
-            return Err(enclaveapp_core::Error::KeyOperation {
-                operation: "bridge_read".into(),
-                detail: format!("bridge response exceeds {MAX_BRIDGE_RESPONSE_BYTES} byte limit"),
-            });
-        }
 
         if line.trim().is_empty() {
             return Err(enclaveapp_core::Error::KeyOperation {

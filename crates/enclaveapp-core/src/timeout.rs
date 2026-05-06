@@ -149,17 +149,46 @@ pub struct LineReaderWithTimeout {
 }
 
 impl LineReaderWithTimeout {
+    /// Build a line reader with no per-line size cap. The worker reads
+    /// until a newline regardless of length — only suitable for
+    /// readers under our own control. Untrusted-peer cases (the WSL
+    /// bridge, anything across a process boundary) should use
+    /// [`Self::with_max_line_bytes`] so a malicious or malfunctioning
+    /// peer can't drive unbounded heap allocation.
     pub fn new<R: Read + Send + 'static>(reader: R) -> Self {
+        Self::spawn(reader, None)
+    }
+
+    /// Build a line reader that aborts (returns `InvalidData`) if a
+    /// single line exceeds `max_line_bytes` before its terminating
+    /// newline. Use this whenever the peer is across a trust boundary
+    /// — it bounds the worst-case allocation per line at
+    /// `max_line_bytes` rather than at the peer's discretion.
+    pub fn with_max_line_bytes<R: Read + Send + 'static>(reader: R, max_line_bytes: usize) -> Self {
+        Self::spawn(reader, Some(max_line_bytes))
+    }
+
+    fn spawn<R: Read + Send + 'static>(reader: R, max_line_bytes: Option<usize>) -> Self {
         let (tx, rx) = mpsc::channel();
         let thread = thread::Builder::new()
             .name("enclaveapp-line-reader".into())
             .spawn(move || {
                 let mut buf_reader = BufReader::new(reader);
                 loop {
-                    let mut line = String::new();
-                    match buf_reader.read_line(&mut line) {
-                        Ok(0) => break, // EOF
-                        Ok(_) => {
+                    let result = match max_line_bytes {
+                        Some(max) => read_line_bounded(&mut buf_reader, max),
+                        None => {
+                            let mut line = String::new();
+                            match buf_reader.read_line(&mut line) {
+                                Ok(0) => Ok(None),
+                                Ok(_) => Ok(Some(line)),
+                                Err(e) => Err(e),
+                            }
+                        }
+                    };
+                    match result {
+                        Ok(None) => break, // EOF
+                        Ok(Some(line)) => {
                             if tx.send(Ok(line)).is_err() {
                                 break;
                             }
@@ -189,6 +218,59 @@ impl LineReaderWithTimeout {
                 TimeoutResult::Completed(Ok(String::new()))
             }
         }
+    }
+}
+
+/// Read a single line into a `String`, returning `Ok(None)` on EOF
+/// before any byte arrives, `Ok(Some(line))` when a newline is hit
+/// (with the newline included, matching `BufRead::read_line`), or
+/// `Err` if the line exceeds `max_bytes` before a newline. The cap
+/// is on the line content excluding any oversize byte that wasn't
+/// consumed.
+fn read_line_bounded<R: BufRead>(reader: &mut R, max_bytes: usize) -> io::Result<Option<String>> {
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        let available = match reader.fill_buf() {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if available.is_empty() {
+            // EOF
+            return if buf.is_empty() {
+                Ok(None)
+            } else {
+                String::from_utf8(buf)
+                    .map(Some)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+            };
+        }
+        // Up to `max_bytes` of remaining capacity, consume bytes
+        // through the next newline if one exists in that slice.
+        let remaining = max_bytes.saturating_sub(buf.len());
+        let usable = &available[..available.len().min(remaining + 1)];
+        if let Some(pos) = usable.iter().position(|&b| b == b'\n') {
+            buf.extend_from_slice(&usable[..=pos]);
+            reader.consume(pos + 1);
+            return String::from_utf8(buf)
+                .map(Some)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+        }
+        // No newline in the usable slice. Either we have headroom
+        // (remaining > 0) and just consume what we have, or we've
+        // hit the cap with no newline — that's a hard error, and we
+        // do NOT consume the offending bytes (so the caller could
+        // resync if they had any way to, though in practice the
+        // session is dead).
+        if remaining == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("line exceeds {max_bytes}-byte cap before newline"),
+            ));
+        }
+        let take = remaining.min(available.len());
+        buf.extend_from_slice(&available[..take]);
+        reader.consume(take);
     }
 }
 
@@ -258,6 +340,56 @@ mod tests {
         // Close stdin so cat exits, then reap the child to avoid a zombie.
         drop(w);
         drop(child.wait());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_line_reader_aborts_when_line_exceeds_cap() {
+        // Feed 200 bytes followed by a newline through a bounded
+        // reader with a 100-byte cap. The reader must surface an
+        // InvalidData error rather than allocating the full 200.
+        //
+        // Use `seq 1 200 | xargs printf 'x%.0s'` rather than bash
+        // brace expansion (`{1..200}`). `/bin/sh` on Linux runners
+        // is `dash`, which doesn't expand `{1..200}` and produces a
+        // single `x` — leading to a flaky pass on macOS (where
+        // `/bin/sh` is bash) and a hard fail on the Linux CI runner.
+        use std::io::Write;
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "seq 1 200 | xargs printf 'x%.0s' && printf '\\n'"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped());
+        let mut child = cmd.spawn().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let reader = LineReaderWithTimeout::with_max_line_bytes(stdout, 100);
+        match reader.recv_line(Duration::from_secs(2)) {
+            TimeoutResult::Completed(Err(e)) => {
+                assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+            }
+            other => panic!("expected InvalidData, got: {:?}", other),
+        }
+        drop(child.kill());
+        drop(child.wait());
+        let _ = Write::flush(&mut io::stdout());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_line_reader_accepts_line_within_cap() {
+        use std::io::Write;
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "printf 'short line\\n'"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped());
+        let mut child = cmd.spawn().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let reader = LineReaderWithTimeout::with_max_line_bytes(stdout, 1024);
+        match reader.recv_line(Duration::from_secs(2)) {
+            TimeoutResult::Completed(Ok(line)) => assert_eq!(line, "short line\n"),
+            other => panic!("expected short line, got: {:?}", other),
+        }
+        drop(child.wait());
+        let _ = Write::flush(&mut io::stdout());
     }
 
     #[cfg(unix)]
