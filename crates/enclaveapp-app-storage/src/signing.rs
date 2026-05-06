@@ -181,7 +181,7 @@ impl AppSigningBackend {
             .clone()
             .unwrap_or_else(|| enclaveapp_core::metadata::keys_dir(&config.app_name));
         let mut keychain_config =
-            enclaveapp_apple::KeychainConfig::with_keys_dir(&config.app_name, keys_dir)
+            enclaveapp_apple::KeychainConfig::with_keys_dir(&config.app_name, keys_dir.clone())
                 .with_user_presence(config.wrapping_key_user_presence)
                 .with_cache_ttl(config.wrapping_key_cache_ttl);
         if let Some(ref group) = config.keychain_access_group {
@@ -192,6 +192,13 @@ impl AppSigningBackend {
         if !signer.is_available() {
             return Err(StorageError::NotAvailable);
         }
+
+        // Verify the configured-label `.meta.hmac` sidecar at init.
+        // sshenc has many labels per agent so this is just a probe
+        // for the canonical one; per-label verification on enumerate
+        // / sign goes through `platform::verify_meta_integrity` from
+        // the agent.
+        crate::platform::verify_meta_integrity(&config.app_name, &keys_dir, &config.key_label)?;
 
         debug!(
             "Secure Enclave signing backend ready (app={})",
@@ -209,11 +216,17 @@ impl AppSigningBackend {
             .keys_dir
             .clone()
             .unwrap_or_else(|| enclaveapp_core::metadata::keys_dir(&config.app_name));
-        let signer = enclaveapp_windows::TpmSigner::with_keys_dir(&config.app_name, keys_dir);
+        let signer =
+            enclaveapp_windows::TpmSigner::with_keys_dir(&config.app_name, keys_dir.clone());
 
         if !signer.is_available() {
             return Err(StorageError::NotAvailable);
         }
+
+        // Same as macOS init — probe the configured label's HMAC
+        // sidecar; per-label verification on enumerate happens in
+        // the agent.
+        crate::platform::verify_meta_integrity(&config.app_name, &keys_dir, &config.key_label)?;
 
         debug!("TPM signing backend ready (app={})", config.app_name,);
         Ok(Self {
@@ -241,8 +254,12 @@ impl AppSigningBackend {
                 .keys_dir
                 .clone()
                 .unwrap_or_else(|| enclaveapp_core::metadata::keys_dir(&config.app_name));
-            let signer =
-                enclaveapp_linux_tpm::LinuxTpmSigner::with_keys_dir(&config.app_name, keys_dir);
+            let signer = enclaveapp_linux_tpm::LinuxTpmSigner::with_keys_dir(
+                &config.app_name,
+                keys_dir.clone(),
+            );
+            // Probe the configured label's HMAC sidecar at init.
+            crate::platform::verify_meta_integrity(&config.app_name, &keys_dir, &config.key_label)?;
             debug!("Linux TPM signing backend ready (app={})", config.app_name);
             // Best-effort marker write — losing this is not a hard
             // failure. The next successful init will write it again.
@@ -268,6 +285,11 @@ impl AppSigningBackend {
         }
 
         let backend = Self::init_linux_keyring(config)?;
+        let keys_dir = config
+            .keys_dir
+            .clone()
+            .unwrap_or_else(|| enclaveapp_core::metadata::keys_dir(&config.app_name));
+        crate::platform::verify_meta_integrity(&config.app_name, &keys_dir, &config.key_label)?;
         drop(backend_marker::write(&config.app_name, backend.kind));
         Ok(backend)
     }
