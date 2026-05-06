@@ -227,7 +227,14 @@ impl LineReaderWithTimeout {
 /// `Err` if the line exceeds `max_bytes` before a newline. The cap
 /// is on the line content excluding any oversize byte that wasn't
 /// consumed.
-fn read_line_bounded<R: BufRead>(reader: &mut R, max_bytes: usize) -> io::Result<Option<String>> {
+///
+/// Public so it can be exercised by fuzz harnesses; production
+/// callers should normally use `LineReaderWithTimeout::with_max_line_bytes`
+/// instead, which adds the timeout-aware worker thread on top.
+pub fn read_line_bounded<R: BufRead>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> io::Result<Option<String>> {
     let mut buf: Vec<u8> = Vec::new();
     loop {
         let available = match reader.fill_buf() {
