@@ -148,6 +148,84 @@ pub fn verify_meta_integrity(
     }
 }
 
+/// Cross-platform per-key meta-integrity verification using the
+/// new keychain-tag trust anchor.
+///
+/// Used by callers that read `.meta` directly from disk and don't
+/// otherwise hit the platform key manager (e.g., sshenc's bulk-list
+/// path that intentionally avoids per-op prompts). On macOS this
+/// pulls the agent-cached meta-HMAC key, recomputes the tag of the
+/// on-disk `.meta`, and compares it to the keychain-stored tag for
+/// the same label.
+///
+/// Returns:
+/// - `Ok(())` on a clean verify, on a missing meta file (caller's
+///   "key not found" flow handles it), and on `KeychainUnavailable`
+///   (fail-open; matches the existing wrapping-key load behavior).
+/// - `Err(StorageError::KeyInitFailed)` on confirmed tamper or
+///   legacy-meta state. Detail string contains the user-actionable
+///   recovery path.
+///
+/// **Platform coverage:** macOS only as of this PR. Windows and
+/// Linux do not yet have the per-key keychain-tag trust anchor
+/// implementation; the function is a no-op (`Ok(())`) there. The
+/// init-time `verify_meta_integrity` (sidecar-only) still applies
+/// to those platforms via the existing call sites in
+/// `enclaveapp-app-storage::signing` / `encryption`.
+pub fn check_meta_integrity(
+    app_name: &str,
+    label: &str,
+    keys_dir: &std::path::Path,
+) -> crate::error::Result<()> {
+    // Don't reach into the platform secure store unless an on-disk
+    // `.meta` exists. Without this guard, synthetic call sites (test
+    // binaries, fresh-install probes, rebuilds with new ad-hoc
+    // signatures) trigger the legacy-Keychain ACL prompt for the
+    // unrelated meta-HMAC item from a prior signed binary.
+    let meta_path = keys_dir.join(format!("{label}.meta"));
+    if !meta_path.exists() {
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let hmac_key = match enclaveapp_apple::meta_hmac::load_or_create(app_name) {
+            Ok(Some(k)) => k,
+            _ => return Ok(()),
+        };
+        let outcome =
+            enclaveapp_apple::meta_tag::verify(app_name, label, keys_dir, hmac_key.as_slice())
+                .map_err(|e| crate::error::StorageError::KeyInitFailed(e.to_string()))?;
+        match outcome {
+            enclaveapp_apple::meta_tag::VerifyOutcome::Match
+            | enclaveapp_apple::meta_tag::VerifyOutcome::NoMeta
+            | enclaveapp_apple::meta_tag::VerifyOutcome::KeychainUnavailable => Ok(()),
+            enclaveapp_apple::meta_tag::VerifyOutcome::Tamper => {
+                Err(crate::error::StorageError::KeyInitFailed(format!(
+                    "key '{label}': metadata integrity check failed. The on-disk meta does \
+                     not match the keychain-stored tag — meta may have been tampered with. \
+                     Refusing to proceed. Regenerate the key to restore a known-good state."
+                )))
+            }
+            enclaveapp_apple::meta_tag::VerifyOutcome::Legacy => {
+                Err(crate::error::StorageError::KeyInitFailed(format!(
+                    "key '{label}' has no integrity tag. This is a one-time migration \
+                     required by upgrading to a build that introduces meta integrity tags, \
+                     and is not something future upgrades will repeat. If you have already \
+                     run `{app_name} migrate-meta` on this machine, treat this as a tamper \
+                     signal — do not run it again. Regenerate the affected key instead. \
+                     Before migrating, verify the key's current policy looks correct: \
+                     `{app_name} inspect {label}`. To migrate: `{app_name} migrate-meta`."
+                )))
+            }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app_name, label, keys_dir);
+        Ok(())
+    }
+}
+
 /// Remove the per-app meta-HMAC key from the platform's secure
 /// store. Used by the uninstall flow so a clean reinstall doesn't
 /// reuse a stale key. Idempotent: missing-entry is success.

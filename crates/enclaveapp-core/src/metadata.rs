@@ -400,6 +400,22 @@ pub fn migrate_meta_to_hmac(dir: &Path, label: &str, hmac_key: &[u8]) -> Result<
 /// Implemented directly over SHA-256 per RFC 2104 so we don't pull in
 /// a new dep for a single use. The output is lowercase hex, 64 chars.
 fn compute_meta_hmac(key: &[u8], data: &[u8]) -> String {
+    let bytes = compute_meta_hmac_bytes(key, data);
+    let mut out = String::with_capacity(64);
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+/// Compute HMAC-SHA256 over `data` keyed by `key`, returned as raw
+/// bytes.
+///
+/// Same algorithm as [`compute_meta_hmac`]; this variant skips the
+/// hex encoding for callers that need the raw tag (e.g., the macOS
+/// per-key meta-tag store, which persists 32 bytes directly into a
+/// keychain item).
+pub fn compute_meta_hmac_bytes(key: &[u8], data: &[u8]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
 
     const BLOCK_SIZE: usize = 64; // SHA-256 block size
@@ -430,10 +446,8 @@ fn compute_meta_hmac(key: &[u8], data: &[u8]) -> String {
     outer.update(inner_digest);
     let outer_digest = outer.finalize();
 
-    let mut out = String::with_capacity(64);
-    for byte in outer_digest {
-        out.push_str(&format!("{byte:02x}"));
-    }
+    let mut out = [0_u8; 32];
+    out.copy_from_slice(&outer_digest);
     out
 }
 

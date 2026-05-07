@@ -19,6 +19,8 @@ mod keychain_wrap;
 mod lacontext;
 #[cfg(target_os = "macos")]
 pub mod meta_hmac;
+#[cfg(target_os = "macos")]
+pub mod meta_tag;
 
 #[cfg(all(target_os = "macos", feature = "encryption"))]
 mod encrypt;

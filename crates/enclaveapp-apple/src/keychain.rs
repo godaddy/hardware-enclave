@@ -272,6 +272,12 @@ pub fn generate_and_save_key(
 
     let app_name_for_cleanup = app_name.clone();
     let access_group_for_cleanup = config.keychain_access_group.clone();
+    // Keep a copy of `data_rep` for the post-persist rollback path.
+    // The cleanup closure moves the original into the SE-delete FFI
+    // call, so without this clone we'd need to round-trip back through
+    // the keychain to unwrap the persisted handle just to delete the
+    // SE key on a meta-tag failure.
+    let data_rep_for_post_persist_rollback = data_rep.clone();
     let cleanup = move || {
         drop(crate::keychain_wrap::keychain_delete(
             &app_name_for_cleanup,
@@ -290,30 +296,171 @@ pub fn generate_and_save_key(
         cleanup,
     )?;
 
-    // Layer the HMAC sidecar on top of the persisted meta. Best-
-    // effort: a Keychain failure here doesn't fail the keygen,
-    // because the next strict-mode load will hit the migration
-    // path and write a sidecar from the existing meta. The
-    // sshenc-agent is the single binary that reads the macOS
-    // Keychain in production so this call is the same single-
-    // binary access pattern as the wrapping keys.
-    if let Ok(Some(hmac_key)) = crate::meta_hmac::load_or_create(&config.app_name) {
-        if let Err(e) = metadata::save_meta_with_hmac(
-            &dir,
-            label,
-            &KeyMeta::new(label, key_type, policy),
-            hmac_key.as_slice(),
-        ) {
+    // Now layer the meta-integrity tag onto the keychain. This is
+    // the trust anchor for `<label>.meta` going forward — the on-disk
+    // `<label>.meta.hmac` sidecar is a derivable cache, not the
+    // authority. See `docs/design-meta-hmac-trust-anchor.md`.
+    //
+    // Two failure modes:
+    //   - meta-HMAC key unavailable (Keychain locked, FFI failure):
+    //     fail-open. Match pre-vN behavior. Key is usable but the
+    //     verify path will report `KeychainUnavailable` until the
+    //     Keychain comes back, at which point the user can run
+    //     migrate-meta to bless the current state.
+    //   - meta-HMAC key available but `meta_tag::store` fails: hard
+    //     error. The key would be in `legacy_meta` state (refused by
+    //     the agent at first op). Roll back the whole keygen so the
+    //     user retries cleanly.
+    let hmac_key_opt = crate::meta_hmac::load_or_create(&config.app_name)
+        .ok()
+        .flatten();
+    if let Some(hk) = hmac_key_opt {
+        let meta_path = dir.join(format!("{label}.meta"));
+        let meta_bytes = match std::fs::read(&meta_path) {
+            Ok(b) => b,
+            Err(e) => {
+                rollback_after_persist(
+                    &dir,
+                    label,
+                    &config.app_name,
+                    config.keychain_access_group.as_deref(),
+                    &data_rep_for_post_persist_rollback,
+                );
+                return Err(Error::KeyOperation {
+                    operation: "post_persist_meta_read".into(),
+                    detail: format!("read {}: {e}", meta_path.display()),
+                });
+            }
+        };
+        let tag = metadata::compute_meta_hmac_bytes(hk.as_slice(), &meta_bytes);
+        if let Err(e) = crate::meta_tag::store(&config.app_name, label, &tag) {
+            rollback_after_persist(
+                &dir,
+                label,
+                &config.app_name,
+                config.keychain_access_group.as_deref(),
+                &data_rep_for_post_persist_rollback,
+            );
+            return Err(e);
+        }
+
+        // On-disk sidecar (best-effort cache; verify uses the
+        // keychain tag as authority and rebuilds this from the
+        // keychain tag on demand).
+        let hmac_path = dir.join(format!("{label}.meta.hmac"));
+        let mut tag_hex = String::with_capacity(64);
+        for byte in tag {
+            tag_hex.push_str(&format!("{byte:02x}"));
+        }
+        if let Err(e) = metadata::atomic_write(&hmac_path, tag_hex.as_bytes()) {
             tracing::warn!(
                 label = label,
                 error = %e,
-                "post-persist meta-HMAC sidecar write failed; \
-                 will be picked up by the next load's auto-migrate"
+                "post-persist .meta.hmac sidecar write failed (best-effort cache; \
+                 verify will rebuild from keychain tag)"
             );
         }
+    } else {
+        tracing::warn!(
+            label = label,
+            "meta-HMAC key unavailable at keygen; key persisted without integrity tag. \
+             Run `<app> migrate-meta` once the Keychain is reachable."
+        );
     }
 
     Ok(pub_key)
+}
+
+/// Run the per-op meta-integrity check against the keychain-stored
+/// tag. Returns `Ok(())` on a clean verify, on a missing meta file
+/// (`NoMeta` — caller's key-not-found flow handles it downstream),
+/// and on `KeychainUnavailable` (fail-open; the wrapping-key load
+/// will fail with its own clearer error if the keychain truly is
+/// locked).
+///
+/// Returns `Err` on **tamper** (keychain tag exists but doesn't match
+/// the on-disk meta) and on **legacy** (no keychain tag — this is
+/// either a pre-migration key or an attacker-induced state). The
+/// error messages describe the user's recovery path.
+fn ensure_meta_integrity(app_name: &str, label: &str, dir: &std::path::Path) -> Result<()> {
+    // CRITICAL: do not touch the platform Keychain unless an on-disk
+    // `.meta` actually exists for this label. Without this guard,
+    // every test that exercises load_handle / load_pub_key on a
+    // synthetic dir without a `.meta` would call into
+    // `meta_hmac::load_or_create` — which on macOS hits the legacy
+    // Keychain. Each rebuild produces a binary with a different
+    // ad-hoc signature, so the legacy-Keychain ACL prompts the user
+    // to grant the new binary access to existing items. The result
+    // is a string of password prompts during cargo test for the
+    // unrelated `test-app` meta-HMAC entry. Mirrors the same guard
+    // in `enclaveapp-app-storage::platform::verify_meta_integrity`.
+    let meta_path = dir.join(format!("{label}.meta"));
+    if !meta_path.exists() {
+        return Ok(());
+    }
+
+    let hmac_key = match crate::meta_hmac::load_or_create(app_name) {
+        Ok(Some(k)) => k,
+        // Keychain unreachable. Fail-open here; the wrapping-key
+        // load downstream will produce its own clearer error if
+        // the Keychain is truly locked.
+        Ok(None) | Err(_) => return Ok(()),
+    };
+
+    match crate::meta_tag::verify(app_name, label, dir, hmac_key.as_slice())? {
+        crate::meta_tag::VerifyOutcome::Match
+        | crate::meta_tag::VerifyOutcome::NoMeta
+        | crate::meta_tag::VerifyOutcome::KeychainUnavailable => Ok(()),
+        crate::meta_tag::VerifyOutcome::Tamper => Err(Error::KeyOperation {
+            operation: "meta_tag_verify".into(),
+            detail: format!(
+                "key '{label}': metadata integrity check failed. The on-disk meta \
+                 does not match the keychain-stored tag — meta may have been \
+                 tampered with. Refusing to proceed. Regenerate the key to restore \
+                 a known-good state."
+            ),
+        }),
+        crate::meta_tag::VerifyOutcome::Legacy => Err(Error::KeyOperation {
+            operation: "meta_tag_legacy".into(),
+            detail: format!(
+                "key '{label}' has no integrity tag. This is a one-time migration \
+                 required by upgrading to a build that introduces meta integrity \
+                 tags, and is not something future upgrades will repeat. If you \
+                 have already run `{app_name} migrate-meta` on this machine, treat \
+                 this as a tamper signal — do not run it again. Regenerate the \
+                 affected key instead. Before migrating, verify the key's current \
+                 policy looks correct: `{app_name} inspect {label}`. To migrate: \
+                 `{app_name} migrate-meta`."
+            ),
+        }),
+    }
+}
+
+/// Roll back a half-completed keygen *after* persist_saved_key_material
+/// has succeeded, when a subsequent step (meta-tag write) failed.
+///
+/// Order matters: SE key delete needs the data_rep we kept from
+/// pre-wrap, before files are removed. Each step is best-effort; we
+/// log warnings and continue so partial cleanup doesn't strand resources.
+fn rollback_after_persist(
+    dir: &std::path::Path,
+    label: &str,
+    app_name: &str,
+    access_group: Option<&str>,
+    data_rep: &[u8],
+) {
+    if let Err(e) = crate::meta_tag::delete(app_name, label) {
+        tracing::warn!(label = label, error = %e, "rollback: meta_tag::delete failed");
+    }
+    if let Err(e) = cleanup_persisted_key_material(dir, label) {
+        tracing::warn!(label = label, error = %e, "rollback: file cleanup failed");
+    }
+    if let Err(e) = crate::keychain_wrap::keychain_delete(app_name, label, access_group) {
+        tracing::warn!(label = label, error = %e, "rollback: wrapping-key delete failed");
+    }
+    if let Err(e) = delete_key_from_data_rep(data_rep) {
+        tracing::warn!(label = label, error = %e, "rollback: SE key delete failed");
+    }
 }
 
 /// Extract the public key from a persisted data representation.
@@ -395,12 +542,40 @@ pub fn rename_key(config: &KeychainConfig, old_label: &str, new_label: &str) -> 
     let dir = config.keys_dir();
     let _lock = metadata::DirLock::acquire(&dir)?;
 
+    // Don't touch the platform Keychain (meta-HMAC key lookup) until
+    // we know the source key actually exists on disk. Without this
+    // pre-check, a `rename` against a missing label still hits the
+    // legacy Keychain and fires an ACL prompt on first call from a
+    // test binary or rebuilt unsigned dev binary.
+    let old_handle = dir.join(format!("{old_label}.handle"));
+    let old_meta = dir.join(format!("{old_label}.meta"));
+    if !old_handle.exists() && !old_meta.exists() {
+        return Err(Error::KeyNotFound {
+            label: old_label.to_string(),
+        });
+    }
+
+    // Pull the per-app meta-HMAC key once so the file rename can
+    // recompute the `.meta.hmac` sidecar under the new label, and so
+    // we can re-stamp the keychain meta-tag below. None when the
+    // Keychain is unreachable — sidecar/tag work is skipped, matching
+    // pre-vN behavior. The agent's verify path will treat the result
+    // as `Legacy` until the next migrate-meta run.
+    let hmac_key_opt = crate::meta_hmac::load_or_create(&config.app_name)
+        .ok()
+        .flatten();
+
     // Disk rename first — cheap to roll back and doesn't touch the
-    // keychain. If this fails the keychain is untouched.
-    // Apple/Secure Enclave keys do not use the `.meta.hmac` sidecar
-    // (hardware-side enforcement makes the meta HMAC redundant), so
-    // pass `None`.
-    metadata::rename_key_files(&dir, old_label, new_label, None)?;
+    // keychain. If this fails the keychain is untouched. Pass the
+    // meta-HMAC key so the sidecar is recomputed against the
+    // rewritten meta JSON; without it `rename_key_files` would error
+    // out if a sidecar is present (and it always is post-vN keygen).
+    metadata::rename_key_files(
+        &dir,
+        old_label,
+        new_label,
+        hmac_key_opt.as_ref().map(|z| z.as_slice()),
+    )?;
 
     // Move the wrapping-key entry via the oracle API. The raw key
     // bytes never escape `keychain_wrap`. On failure, roll back the
@@ -413,7 +588,12 @@ pub fn rename_key(config: &KeychainConfig, old_label: &str, new_label: &str) -> 
         config.wrapping_key_user_presence,
         config.keychain_access_group.as_deref(),
     ) {
-        let rollback = metadata::rename_key_files(&dir, new_label, old_label, None);
+        let rollback = metadata::rename_key_files(
+            &dir,
+            new_label,
+            old_label,
+            hmac_key_opt.as_ref().map(|z| z.as_slice()),
+        );
         if let Err(rollback_err) = rollback {
             tracing::error!(
                 "rename_key: relabel_wrapping_key failed ({error}) and disk rollback ALSO failed \
@@ -421,6 +601,36 @@ pub fn rename_key(config: &KeychainConfig, old_label: &str, new_label: &str) -> 
             );
         }
         return Err(error);
+    }
+
+    // Move the keychain meta-tag entry to the new label. The tag is
+    // recomputed against the rewritten meta JSON (which now embeds
+    // `new_label`). Failure here is logged and surfaced as an error;
+    // the user re-runs `<app> migrate-meta` to re-tag if needed.
+    if let Some(hk) = hmac_key_opt {
+        let new_meta_path = dir.join(format!("{new_label}.meta"));
+        if let Ok(meta_bytes) = std::fs::read(&new_meta_path) {
+            let tag = metadata::compute_meta_hmac_bytes(hk.as_slice(), &meta_bytes);
+            if let Err(e) = crate::meta_tag::store(&config.app_name, new_label, &tag) {
+                tracing::error!(
+                    old_label = old_label,
+                    new_label = new_label,
+                    error = %e,
+                    "rename_key: meta_tag store under new label failed; \
+                     run `<app> migrate-meta` to restore the integrity tag"
+                );
+                return Err(e);
+            }
+        }
+        // Best-effort cleanup of the old-label tag. If this fails the
+        // orphan is harmless (no on-disk meta to verify against).
+        if let Err(e) = crate::meta_tag::delete(&config.app_name, old_label) {
+            tracing::warn!(
+                old_label = old_label,
+                error = %e,
+                "rename_key: stale meta-tag for old label could not be deleted (harmless orphan)"
+            );
+        }
     }
 
     Ok(())
@@ -459,7 +669,17 @@ pub fn load_handle_with_context(
     lacontext_token: u64,
 ) -> Result<Zeroizing<Vec<u8>>> {
     validate_label(label)?;
-    let path = config.keys_dir().join(format!("{label}.handle"));
+    let dir = config.keys_dir();
+
+    // Verify meta integrity before unwrapping the handle. This is the
+    // per-op trust-anchor check: keychain-stored tag must match the
+    // on-disk `.meta`. Tamper or legacy-meta states refuse the
+    // operation here, before the wrapping key is loaded — so the
+    // user never burns a Touch ID on a key whose policy fields have
+    // been edited.
+    ensure_meta_integrity(&config.app_name, label, &dir)?;
+
+    let path = dir.join(format!("{label}.handle"));
     if !path.exists() {
         return Err(Error::KeyNotFound {
             label: label.to_string(),
@@ -501,6 +721,13 @@ pub fn load_handle_with_context(
 pub fn load_pub_key(config: &KeychainConfig, label: &str, key_type: KeyType) -> Result<Vec<u8>> {
     validate_label(label)?;
     let dir = config.keys_dir();
+
+    // Verify meta integrity before returning anything for this label.
+    // The `.pub` cache is fast-path data, but we don't want a tampered
+    // `.meta` to be silently consumed downstream (e.g., a CLI showing
+    // "presence_mode: none" when the user expects strict). The verify
+    // surfaces the policy-tamper before the public key is returned.
+    ensure_meta_integrity(&config.app_name, label, &dir)?;
 
     // Fast path: the `.pub` file is written at key-creation time by
     // `persist_saved_key_material` and re-synced after any successful
@@ -580,6 +807,16 @@ pub fn delete_key(config: &KeychainConfig, label: &str) -> Result<()> {
         tracing::warn!(
             label = label,
             "keychain_delete failed during delete_key (harmless if the handle is already gone): {error}"
+        );
+    }
+
+    // And the per-key meta-integrity tag. Same best-effort treatment:
+    // an orphan tag entry without its meta file can't be used by
+    // anything (verify keys off the meta presence on disk).
+    if let Err(error) = crate::meta_tag::delete(&config.app_name, label) {
+        tracing::warn!(
+            label = label,
+            "meta_tag::delete failed during delete_key (harmless orphan if the meta is already gone): {error}"
         );
     }
 
@@ -695,7 +932,7 @@ fn prepare_label_for_save(dir: &std::path::Path, label: &str) -> Result<()> {
 }
 
 fn cleanup_persisted_key_material(dir: &std::path::Path, label: &str) -> Result<()> {
-    for extension in ["handle", "pub", "meta", "ssh.pub"] {
+    for extension in ["handle", "pub", "meta", "meta.hmac", "ssh.pub"] {
         let path = dir.join(format!("{label}.{extension}"));
         if path.is_file() {
             std::fs::remove_file(path)?;
