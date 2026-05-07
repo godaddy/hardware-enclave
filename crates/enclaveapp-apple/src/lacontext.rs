@@ -42,10 +42,14 @@ pub(crate) struct LaContextHandle {
 
 impl LaContextHandle {
     #[allow(unsafe_code)] // FFI call to Swift LAContext registry
-    fn new(ttl: Duration) -> Option<Self> {
+    fn new(app_name: &str, ttl: Duration) -> Option<Self> {
         let secs = ttl.as_secs_f64();
-        // SAFETY: FFI to Swift bridge — pure value-typed call.
-        let token = unsafe { ffi::enclaveapp_se_lacontext_create(secs) };
+        let app_name_len = i32::try_from(app_name.len()).ok()?;
+        // SAFETY: FFI to Swift bridge. `app_name` is passed as a borrowed
+        // byte slice for the duration of the call; Swift copies it before
+        // returning and never retains the pointer.
+        let token =
+            unsafe { ffi::enclaveapp_se_lacontext_create(secs, app_name.as_ptr(), app_name_len) };
         if token == 0 {
             None
         } else {
@@ -117,7 +121,7 @@ pub(crate) fn acquire(app_name: &str, label: &str, ttl_secs: u64) -> Option<Arc<
         guard.remove(&key);
     }
 
-    let handle = LaContextHandle::new(ttl)?;
+    let handle = LaContextHandle::new(app_name, ttl)?;
     let arc = Arc::new(handle);
     guard.insert(key, Arc::clone(&arc));
     Some(arc)
