@@ -127,6 +127,25 @@ impl EnclaveKeyManager for TpmEncryptor {
             key::delete_key(&self.app_name, label)
         })?;
 
+        // Layer the HMAC sidecar on top of the persisted meta.
+        // Best-effort: failures here don't fail the keygen.
+        if let Ok(Some(hmac_key)) = crate::meta_hmac::load_or_create(&self.app_name) {
+            let meta = enclaveapp_core::KeyMeta::new(label, key_type, policy);
+            if let Err(e) = enclaveapp_core::metadata::save_meta_with_hmac(
+                state.dir(),
+                label,
+                &meta,
+                hmac_key.as_slice(),
+            ) {
+                tracing::warn!(
+                    label = label,
+                    error = %e,
+                    "post-persist meta-HMAC sidecar write failed; \
+                     next load's auto-migrate will retry"
+                );
+            }
+        }
+
         Ok(pub_key)
     }
 

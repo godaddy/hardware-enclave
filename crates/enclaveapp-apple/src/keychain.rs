@@ -290,6 +290,29 @@ pub fn generate_and_save_key(
         cleanup,
     )?;
 
+    // Layer the HMAC sidecar on top of the persisted meta. Best-
+    // effort: a Keychain failure here doesn't fail the keygen,
+    // because the next strict-mode load will hit the migration
+    // path and write a sidecar from the existing meta. The
+    // sshenc-agent is the single binary that reads the macOS
+    // Keychain in production so this call is the same single-
+    // binary access pattern as the wrapping keys.
+    if let Ok(Some(hmac_key)) = crate::meta_hmac::load_or_create(&config.app_name) {
+        if let Err(e) = metadata::save_meta_with_hmac(
+            &dir,
+            label,
+            &KeyMeta::new(label, key_type, policy),
+            hmac_key.as_slice(),
+        ) {
+            tracing::warn!(
+                label = label,
+                error = %e,
+                "post-persist meta-HMAC sidecar write failed; \
+                 will be picked up by the next load's auto-migrate"
+            );
+        }
+    }
+
     Ok(pub_key)
 }
 
@@ -619,6 +642,11 @@ where
     }
 
     let meta = KeyMeta::new(label, key_type, policy);
+    // Plain meta write only. The HMAC sidecar is layered on top
+    // by the higher-level `generate_and_save_key` after persist
+    // returns — that keeps `persist_saved_key_material` free of
+    // any Keychain dependency so tests of this helper don't drag
+    // the platform meta-HMAC store into a real Keychain access.
     if let Err(error) = metadata::save_meta(dir, label, &meta) {
         return Err(with_cleanup_context(
             "persist metadata",

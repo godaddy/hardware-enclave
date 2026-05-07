@@ -14,7 +14,7 @@ use crate::state;
 use enclaveapp_core::metadata;
 use enclaveapp_core::traits::{EnclaveKeyManager, EnclaveSigner};
 use enclaveapp_core::types::validate_label;
-use enclaveapp_core::{AccessPolicy, Error, KeyType, Result};
+use enclaveapp_core::{AccessPolicy, Error, KeyMeta, KeyType, Result};
 use sha2::{Digest, Sha256};
 use windows::Win32::Security::Cryptography::*;
 
@@ -83,6 +83,24 @@ impl EnclaveKeyManager for TpmSigner {
         state.persist_generated_key(label, key_type, policy, &pub_key, || {
             key::delete_key(&self.app_name, label)
         })?;
+
+        // Layer the HMAC sidecar on top of the persisted meta. Same
+        // best-effort posture as the macOS path: a DPAPI failure
+        // here doesn't fail keygen, the next strict-mode load will
+        // hit the migration path. Cached after first call.
+        if let Ok(Some(hmac_key)) = crate::meta_hmac::load_or_create(&self.app_name) {
+            let meta = KeyMeta::new(label, key_type, policy);
+            if let Err(e) =
+                metadata::save_meta_with_hmac(state.dir(), label, &meta, hmac_key.as_slice())
+            {
+                tracing::warn!(
+                    label = label,
+                    error = %e,
+                    "post-persist meta-HMAC sidecar write failed; \
+                     will be picked up by the next load's auto-migrate"
+                );
+            }
+        }
 
         Ok(pub_key)
     }

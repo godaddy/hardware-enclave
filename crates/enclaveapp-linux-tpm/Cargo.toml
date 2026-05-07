@@ -30,3 +30,10 @@ rand = { workspace = true, optional = true }
 # On musl (Alpine), the crate compiles as empty stubs (is_available() = false).
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 tss-esapi = { workspace = true }
+
+# Pulled in for `meta_hmac_key` so the Linux-TPM backend can write
+# `.meta.hmac` sidecars at keygen with the same Secret Service key
+# that the keyring backend uses. Same crate, same key, same threat
+# threshold.
+[target.'cfg(target_os = "linux")'.dependencies]
+enclaveapp-keyring = { workspace = true }

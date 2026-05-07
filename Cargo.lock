@@ -457,6 +457,7 @@ dependencies = [
  "dirs",
  "elliptic-curve",
  "enclaveapp-core",
+ "enclaveapp-keyring",
  "p256",
  "rand",
  "serde",
@@ -512,6 +513,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tracing",
  "windows",
  "zeroize",
 ]

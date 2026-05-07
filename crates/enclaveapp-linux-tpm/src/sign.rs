@@ -109,6 +109,27 @@ impl EnclaveKeyManager for LinuxTpmSigner {
             &dir, label, key_type, policy, &pub_key, &pub_blob, &priv_blob,
         )?;
 
+        // Layer the HMAC sidecar on top of the persisted meta.
+        // Best-effort: a Secret Service failure here doesn't fail
+        // keygen — the next strict-mode load runs the migration
+        // step. Same threshold as the keyring backend's HMAC path.
+        if let Some(hmac_key) = enclaveapp_keyring::meta_hmac_key(&self.config.app_name) {
+            let meta = enclaveapp_core::KeyMeta::new(label, key_type, policy);
+            if let Err(e) = enclaveapp_core::metadata::save_meta_with_hmac(
+                &dir,
+                label,
+                &meta,
+                hmac_key.as_slice(),
+            ) {
+                tracing::warn!(
+                    label = label,
+                    error = %e,
+                    "linux-tpm: post-persist meta-HMAC sidecar write failed; \
+                     next load's auto-migrate will retry"
+                );
+            }
+        }
+
         Ok(pub_key)
     }
 
