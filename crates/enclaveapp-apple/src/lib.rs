@@ -15,7 +15,7 @@ mod ffi;
 mod keychain;
 #[cfg(target_os = "macos")]
 mod keychain_wrap;
-#[cfg(all(target_os = "macos", feature = "signing"))]
+#[cfg(all(target_os = "macos", any(feature = "signing", feature = "encryption")))]
 mod lacontext;
 #[cfg(target_os = "macos")]
 pub mod meta_hmac;

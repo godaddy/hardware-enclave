@@ -293,7 +293,7 @@ fn cache_evict(app_name: &str, label: &str) {
     // any reusable user-presence authentication tied to it. Otherwise
     // a delete-then-recreate flow would leak the prior context across
     // a key identity change.
-    #[cfg(feature = "signing")]
+    #[cfg(any(feature = "signing", feature = "encryption"))]
     crate::lacontext::evict(app_name, label);
 }
 
@@ -825,7 +825,9 @@ mod tests {
     // ───── Real-keychain integration tests (macOS only) ─────
     //
     // These exercise the Swift FFI against the system login keychain.
-    // They run by default in `cargo test` on macOS. Each test uses a
+    // They are ignored by default because every test binary has a
+    // fresh ad-hoc signature and can trigger macOS Keychain password
+    // prompts for existing test entries. Each test uses a
     // test-unique service+account pair so parallel test runs don't
     // interfere with each other, and each test cleans up after itself
     // via a drop guard so a failing test never leaves an orphaned
@@ -867,6 +869,7 @@ mod tests {
     const TEST_APP: &str = "enclaveapp-test";
 
     #[test]
+    #[ignore = "hits the real macOS Keychain; run explicitly when testing Keychain FFI"]
     fn keychain_roundtrip_basic() {
         let label = unique_test_label("basic");
         let _guard = KeychainEntryGuard::new(TEST_APP, &label);
@@ -880,6 +883,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "hits the real macOS Keychain; run explicitly when testing Keychain FFI"]
     fn keychain_load_missing_returns_none() {
         let label = unique_test_label("missing");
         // No guard needed — we never stored anything.
@@ -888,6 +892,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "hits the real macOS Keychain; run explicitly when testing Keychain FFI"]
     fn keychain_store_is_idempotent_upsert() {
         let label = unique_test_label("upsert");
         let _guard = KeychainEntryGuard::new(TEST_APP, &label);
@@ -904,6 +909,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "hits the real macOS Keychain; run explicitly when testing Keychain FFI"]
     fn keychain_delete_is_idempotent() {
         let label = unique_test_label("del-idem");
         // Delete without prior store — should succeed.
@@ -913,6 +919,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "hits the real macOS Keychain; run explicitly when testing Keychain FFI"]
     fn keychain_delete_actually_removes() {
         let label = unique_test_label("del-real");
         let _guard = KeychainEntryGuard::new(TEST_APP, &label);
@@ -932,6 +939,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "hits the real macOS Keychain; run explicitly when testing Keychain FFI"]
     fn keychain_per_label_isolation() {
         // Two labels under the same app get independent entries.
         let label_a = unique_test_label("iso-a");
@@ -969,6 +977,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "hits the real macOS Keychain; run explicitly when testing Keychain FFI"]
     fn keychain_per_app_isolation() {
         // Same label under different app names get independent entries.
         let label = unique_test_label("app-iso");
@@ -996,6 +1005,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "hits the real macOS Keychain; run explicitly when testing Keychain FFI"]
     fn full_wrap_unwrap_via_keychain_lifecycle() {
         // End-to-end: generate key → keychain_store → encrypt →
         // keychain_load → decrypt → verify plaintext round-trips.
@@ -1017,6 +1027,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "hits the real macOS Keychain; run explicitly when testing Keychain FFI"]
     fn encrypt_under_wrong_keychain_key_fails() {
         // If someone swaps the keychain entry for a different key while
         // the wrapped blob remains the old one, decrypt must fail —

@@ -5,9 +5,11 @@
 
 use crate::ffi;
 use crate::keychain::{self, KeychainConfig};
+use crate::lacontext;
 use enclaveapp_core::traits::{EnclaveEncryptor, EnclaveKeyManager};
 use enclaveapp_core::types::{validate_label, AccessPolicy, KeyType};
 use enclaveapp_core::{Error, Result};
+use zeroize::Zeroizing;
 
 /// ECIES ciphertext overhead: version(1) + ephemeral_pub(65) + nonce(12) + tag(16)
 const ECIES_OVERHEAD: usize = 1 + 65 + 12 + 16;
@@ -37,6 +39,22 @@ impl SecureEnclaveEncryptor {
     /// `wrapping_key_cache_ttl` settings.
     pub fn with_config(config: KeychainConfig) -> Self {
         SecureEnclaveEncryptor { config }
+    }
+
+    /// Load the Secure Enclave handle for encryption/decryption using
+    /// the same reusable `LAContext` registry as signing. This lets a
+    /// user-presence-protected wrapping-key item reuse the current
+    /// biometric authentication instead of prompting independently on
+    /// each app-storage decrypt.
+    fn load_handle(&self, label: &str) -> Result<Zeroizing<Vec<u8>>> {
+        let token = lacontext::acquire(
+            &self.config.app_name,
+            label,
+            self.config.wrapping_key_cache_ttl.as_secs(),
+        )
+        .map(|h| h.token())
+        .unwrap_or(0);
+        keychain::load_handle_with_context(&self.config, label, token)
     }
 }
 
@@ -77,7 +95,7 @@ impl EnclaveEncryptor for SecureEnclaveEncryptor {
     #[allow(unsafe_code)] // FFI call to CryptoKit Swift bridge
     fn encrypt(&self, label: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
         validate_label(label)?;
-        let data_rep = keychain::load_handle(&self.config, label)?;
+        let data_rep = self.load_handle(label)?;
 
         let output_capacity = plaintext.len() + ECIES_OVERHEAD;
         let mut ciphertext = vec![0_u8; output_capacity];
@@ -113,7 +131,7 @@ impl EnclaveEncryptor for SecureEnclaveEncryptor {
             });
         }
 
-        let data_rep = keychain::load_handle(&self.config, label)?;
+        let data_rep = self.load_handle(label)?;
 
         let max_plaintext = ciphertext.len();
         let mut plaintext = vec![0_u8; max_plaintext];

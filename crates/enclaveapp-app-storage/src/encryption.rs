@@ -304,10 +304,15 @@ impl AppEncryptionStorage {
             // the verification rather than refusing to proceed,
             // matching the legacy "Linux without Secret Service"
             // behavior.
-            if let Some(hmac_key) = meta_exists
+            #[cfg(test)]
+            let _ = meta_exists;
+            #[cfg(test)]
+            let hmac_key: Option<zeroize::Zeroizing<Vec<u8>>> = None;
+            #[cfg(not(test))]
+            let hmac_key = meta_exists
                 .then(|| crate::platform::meta_hmac_key(&config.app_name))
-                .flatten()
-            {
+                .flatten();
+            if let Some(hmac_key) = hmac_key {
                 let strict = metadata::load_meta_with_hmac(
                     keys_dir,
                     &config.key_label,
@@ -391,7 +396,7 @@ impl AppEncryptionStorage {
         allow(unused_variables)
     )]
     fn stamp_trust_anchor(app_name: &str, label: &str, keys_dir: &std::path::Path) {
-        #[cfg(target_os = "macos")]
+        #[cfg(all(not(test), target_os = "macos"))]
         {
             if let Ok(Some(hk)) = enclaveapp_apple::meta_hmac::load_existing(app_name) {
                 let meta_path = keys_dir.join(format!("{label}.meta"));
@@ -407,7 +412,7 @@ impl AppEncryptionStorage {
                 }
             }
         }
-        #[cfg(target_os = "windows")]
+        #[cfg(all(not(test), target_os = "windows"))]
         {
             if let Ok(Some(hk)) = enclaveapp_windows::meta_hmac::load_or_create(app_name) {
                 if let Err(e) = enclaveapp_windows::meta_tag::stamp_from_disk(
@@ -424,7 +429,7 @@ impl AppEncryptionStorage {
                 }
             }
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(all(not(test), target_os = "linux"))]
         {
             if let Ok(Some(hk)) = enclaveapp_keyring::meta_hmac_key_existing(app_name) {
                 if let Err(e) = enclaveapp_keyring::meta_tag::stamp_from_disk(
@@ -441,6 +446,8 @@ impl AppEncryptionStorage {
                 }
             }
         }
+        #[cfg(test)]
+        let _ = (app_name, label, keys_dir);
     }
 }
 
