@@ -27,6 +27,7 @@ dirs = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 zeroize = { workspace = true }
+tracing = "0.1"
 # keyring requires glibc (needs libdbus for D-Bus Secret Service).
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 keyring = { workspace = true, optional = true }

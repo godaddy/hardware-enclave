@@ -109,10 +109,16 @@ impl EnclaveKeyManager for LinuxTpmSigner {
             &dir, label, key_type, policy, &pub_key, &pub_blob, &priv_blob,
         )?;
 
-        // Layer the HMAC sidecar on top of the persisted meta.
-        // Best-effort: a Secret Service failure here doesn't fail
-        // keygen — the next strict-mode load runs the migration
-        // step. Same threshold as the keyring backend's HMAC path.
+        // Layer the HMAC sidecar on top of the persisted meta, then
+        // stamp the per-key trust-anchor tag against the resulting
+        // `.meta`. Best-effort: a Secret Service failure here
+        // doesn't fail keygen — the next strict-mode load runs the
+        // migration step, and the user can recover via
+        // `<app> migrate-meta`. Same threshold as the keyring
+        // backend's HMAC path. The trust-anchor tag store is the
+        // same Secret Service entry shape the keyring backend uses
+        // (`(<app>, __meta_tag_<label>__)`); both Linux backends
+        // share the same trust domain.
         if let Some(hmac_key) = enclaveapp_keyring::meta_hmac_key(&self.config.app_name) {
             let meta = enclaveapp_core::KeyMeta::new(label, key_type, policy);
             if let Err(e) = enclaveapp_core::metadata::save_meta_with_hmac(
@@ -126,6 +132,20 @@ impl EnclaveKeyManager for LinuxTpmSigner {
                     error = %e,
                     "linux-tpm: post-persist meta-HMAC sidecar write failed; \
                      next load's auto-migrate will retry"
+                );
+            }
+            if let Err(e) = enclaveapp_keyring::meta_tag::stamp_from_disk(
+                &self.config.app_name,
+                label,
+                &dir,
+                hmac_key.as_slice(),
+            ) {
+                tracing::warn!(
+                    label = label,
+                    error = %e,
+                    "linux-tpm: post-persist meta-tag stamp failed; \
+                     first sign will refuse with Legacy until \
+                     `<app> migrate-meta` runs"
                 );
             }
         }
@@ -202,12 +222,90 @@ impl EnclaveKeyManager for LinuxTpmSigner {
     }
 }
 
+/// Run the per-op meta-integrity check against the Secret-Service-
+/// stored tag. Returns `Ok(())` on a clean verify, on a missing meta
+/// file (`NoMeta`), and on `KeychainUnavailable` (fail-open). Returns
+/// `Err` on tamper / legacy. Mirrors the keyring backend's verify
+/// (same module powers both); both Linux backends share the same
+/// Secret Service trust domain so the verify shape is identical.
+///
+/// **Linux TPM specifics:** the TPM key uses empty authorization
+/// (no UI prompt at sign time, the documented design caveat), so the
+/// meta-integrity tag is the only protection against same-UID
+/// rewriting of policy fields in `.meta`. This makes the trust
+/// anchor doubly important on this backend — it's not just a
+/// belt-and-suspenders check, it's the only enforcement.
+fn ensure_meta_integrity(app_name: &str, label: &str, dir: &std::path::Path) -> Result<()> {
+    let meta_path = dir.join(format!("{label}.meta"));
+    if !meta_path.exists() {
+        return Ok(());
+    }
+
+    let hmac_key = match enclaveapp_keyring::meta_hmac_key_existing(app_name) {
+        Ok(Some(k)) => k,
+        Ok(None) | Err(_) => return Ok(()),
+    };
+
+    match enclaveapp_keyring::meta_tag::verify(app_name, label, dir, hmac_key.as_slice())? {
+        enclaveapp_keyring::meta_tag::VerifyOutcome::Match
+        | enclaveapp_keyring::meta_tag::VerifyOutcome::NoMeta
+        | enclaveapp_keyring::meta_tag::VerifyOutcome::KeychainUnavailable => Ok(()),
+        enclaveapp_keyring::meta_tag::VerifyOutcome::Tamper => Err(Error::KeyOperation {
+            operation: "meta_tag_verify".into(),
+            detail: format!(
+                "key '{label}': metadata integrity check failed. The on-disk meta \
+                 does not match the keychain-stored tag — meta may have been \
+                 tampered with. Refusing to proceed. Regenerate the key to restore \
+                 a known-good state."
+            ),
+        }),
+        enclaveapp_keyring::meta_tag::VerifyOutcome::Legacy => {
+            let marker_set =
+                enclaveapp_keyring::meta_migration_marker::is_set(app_name).unwrap_or(false);
+            if marker_set {
+                Err(Error::KeyOperation {
+                    operation: "meta_tag_legacy_post_migration".into(),
+                    detail: format!(
+                        "key '{label}' has no integrity tag, but `{app_name} migrate-meta` \
+                         has already completed on this install. This is a strong tamper \
+                         signal — legitimate operation should not produce a missing tag \
+                         after the marker is set. Recommended: regenerate the affected \
+                         key with `{app_name} keygen`. Do NOT run migrate-meta again \
+                         unless you can independently explain why this key's tag is \
+                         missing (e.g., manual restore from a backup of an unrelated \
+                         machine), in which case pass \
+                         `--force-rerun-i-understand` to override."
+                    ),
+                })
+            } else {
+                Err(Error::KeyOperation {
+                    operation: "meta_tag_legacy".into(),
+                    detail: format!(
+                        "key '{label}' has no integrity tag. This is the one-time \
+                         migration required by upgrading to a build that introduces meta \
+                         integrity tags, and is not something future upgrades will repeat. \
+                         Before migrating, verify the key's current policy looks correct: \
+                         `{app_name} inspect {label}`. To migrate: `{app_name} \
+                         migrate-meta`."
+                    ),
+                })
+            }
+        }
+    }
+}
+
 impl EnclaveSigner for LinuxTpmSigner {
     fn sign(&self, label: &str, data: &[u8]) -> Result<Vec<u8>> {
         // AccessPolicy is stored in key metadata but is not enforced here.
         // The TPM key uses empty authorization; no user prompt occurs regardless
-        // of the policy recorded at generation time.
+        // of the policy recorded at generation time. The trust-anchor check
+        // below is the ONLY defense against same-UID rewriting of policy
+        // fields in `.meta` on this backend.
         validate_label(label)?;
+
+        let dir = self.config.keys_dir();
+        ensure_meta_integrity(&self.config.app_name, label, &dir)?;
+
         let (mut ctx, key_handle) = self.load_key(label)?;
 
         // Pre-hash with SHA-256 (TPM takes a digest, not raw data)

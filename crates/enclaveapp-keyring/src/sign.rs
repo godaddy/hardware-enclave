@@ -4,6 +4,7 @@
 //! Software ECDSA P-256 signing backend.
 
 use crate::key_storage::{self, SoftwareConfig};
+use crate::{meta_migration_marker, meta_tag};
 use enclaveapp_core::traits::{EnclaveKeyManager, EnclaveSigner};
 use enclaveapp_core::types::{validate_label, AccessPolicy, KeyType};
 use enclaveapp_core::{Error, Result};
@@ -49,7 +50,39 @@ impl EnclaveKeyManager for SoftwareSigner {
                 detail: "SoftwareSigner only supports signing keys".into(),
             });
         }
-        key_storage::generate_and_save(&self.config, label, key_type, policy)
+        let pub_key = key_storage::generate_and_save(&self.config, label, key_type, policy)?;
+
+        // Stamp the per-key meta-integrity tag against the meta we
+        // just wrote. `generate_and_save` already wrote
+        // `<label>.meta` (with `app_specific = null`) and the
+        // `.meta.hmac` sidecar; the higher sshenc layer will
+        // re-stamp after appending its `app_specific` fields, so
+        // this inline stamp serves the simpler awsenc / sso-jwt
+        // callers (which don't have a SshencBackend overlay) and as
+        // a fallback for the sshenc layer if the re-stamp fails.
+        // Best-effort: a Secret Service hiccup leaves the user in
+        // the legacy_meta state, recoverable via `migrate-meta`.
+        //
+        // Skip when `use_keyring=false` (test mode) — Secret Service
+        // is not reachable in that configuration; see the parallel
+        // gating in `ensure_meta_integrity`.
+        if self.config.use_keyring {
+            if let Ok(Some(hk)) = key_storage::meta_hmac_key_existing(&self.config.app_name) {
+                let dir = self.config.keys_dir();
+                if let Err(e) =
+                    meta_tag::stamp_from_disk(&self.config.app_name, label, &dir, hk.as_slice())
+                {
+                    tracing::warn!(
+                        label = label,
+                        error = %e,
+                        "post-keygen meta-tag stamp failed; key persisted without trust-anchor tag. \
+                         Run `<app> migrate-meta` once the Secret Service is reachable."
+                    );
+                }
+            }
+        }
+
+        Ok(pub_key)
     }
 
     fn public_key(&self, label: &str) -> Result<Vec<u8>> {
@@ -75,14 +108,137 @@ impl EnclaveKeyManager for SoftwareSigner {
     }
 }
 
+/// Run the per-op meta-integrity check against the Secret-Service-
+/// stored tag. Returns `Ok(())` on a clean verify, on a missing meta
+/// file (`NoMeta` — caller's key-not-found flow handles it
+/// downstream), and on `KeychainUnavailable` (fail-open; the
+/// secret-key load below will produce its own clearer error if the
+/// underlying store is truly broken).
+///
+/// Returns `Err` on **tamper** (Secret Service tag exists but
+/// doesn't match the on-disk meta) and on **legacy** (no tag — pre-
+/// migration key or attacker-induced state). Error messages mirror
+/// the macOS / Windows wording so the user-facing UX is identical
+/// across platforms.
+///
+/// **Linux specifics:** the keyring backend doesn't enforce
+/// `AccessPolicy` at sign time, so the meta-integrity tag is the
+/// ONLY defense against a same-UID attacker rewriting policy fields
+/// in `.meta`. macOS / Windows have hardware-enforced policy bits
+/// at the chip layer that catch some bypasses even if the trust
+/// anchor is defeated; on Linux the trust anchor is the whole
+/// defense for these fields.
+///
+/// `use_keyring` mirrors `SoftwareConfig::use_keyring`. When false
+/// (the `without_keyring()` test mode) we skip the Secret Service
+/// fetch entirely — the existing tests use that flag to avoid
+/// keyring round-trips, and `keyring::Entry::get_secret()` would
+/// otherwise BLOCK waiting for D-Bus session bus that test runners
+/// don't have. Production callers always have it true.
+fn ensure_meta_integrity(
+    app_name: &str,
+    label: &str,
+    dir: &std::path::Path,
+    use_keyring: bool,
+) -> Result<()> {
+    // CRITICAL: do not touch the Secret Service unless an on-disk
+    // `.meta` actually exists. Without this guard, every synthetic
+    // call site (test binary, fresh-install probe) would call into
+    // `meta_hmac_key_existing` — which is a D-Bus round-trip even
+    // on a fresh install with no entry, surfacing as a needless
+    // ~50ms latency on every operation.
+    let meta_path = dir.join(format!("{label}.meta"));
+    if !meta_path.exists() {
+        return Ok(());
+    }
+
+    // Honor `use_keyring=false` — without this guard, tests that
+    // construct `SoftwareSigner::without_keyring()` to avoid Secret
+    // Service interactions would hang here on `get_secret()`'s
+    // D-Bus connect (the keyring crate blocks until session bus is
+    // reachable). Production sshenc never sets this to false.
+    if !use_keyring {
+        return Ok(());
+    }
+
+    // Read-only meta-HMAC key fetch. The meta-HMAC key is created
+    // on first keygen via `meta_hmac_key`; we use the read-only
+    // `_existing` companion here so a verify can never trigger a
+    // Secret Service write (which on a locked keyring would prompt
+    // the user to unlock or fail silently).
+    let hmac_key = match key_storage::meta_hmac_key_existing(app_name) {
+        Ok(Some(k)) => k,
+        Ok(None) | Err(_) => return Ok(()),
+    };
+
+    match meta_tag::verify(app_name, label, dir, hmac_key.as_slice())? {
+        meta_tag::VerifyOutcome::Match
+        | meta_tag::VerifyOutcome::NoMeta
+        | meta_tag::VerifyOutcome::KeychainUnavailable => Ok(()),
+        meta_tag::VerifyOutcome::Tamper => Err(Error::KeyOperation {
+            operation: "meta_tag_verify".into(),
+            detail: format!(
+                "key '{label}': metadata integrity check failed. The on-disk meta \
+                 does not match the keychain-stored tag — meta may have been \
+                 tampered with. Refusing to proceed. Regenerate the key to restore \
+                 a known-good state."
+            ),
+        }),
+        meta_tag::VerifyOutcome::Legacy => {
+            // Strong-tamper variant when the migrate-meta marker is
+            // already set; gentle one-time-cutover variant otherwise.
+            // Treat any Secret Service failure on the marker check
+            // as "marker not set" so the gentle message wins on a
+            // flaky-store host.
+            let marker_set = meta_migration_marker::is_set(app_name).unwrap_or(false);
+            if marker_set {
+                Err(Error::KeyOperation {
+                    operation: "meta_tag_legacy_post_migration".into(),
+                    detail: format!(
+                        "key '{label}' has no integrity tag, but `{app_name} migrate-meta` \
+                         has already completed on this install. This is a strong tamper \
+                         signal — legitimate operation should not produce a missing tag \
+                         after the marker is set. Recommended: regenerate the affected \
+                         key with `{app_name} keygen`. Do NOT run migrate-meta again \
+                         unless you can independently explain why this key's tag is \
+                         missing (e.g., manual restore from a backup of an unrelated \
+                         machine), in which case pass \
+                         `--force-rerun-i-understand` to override."
+                    ),
+                })
+            } else {
+                Err(Error::KeyOperation {
+                    operation: "meta_tag_legacy".into(),
+                    detail: format!(
+                        "key '{label}' has no integrity tag. This is the one-time \
+                         migration required by upgrading to a build that introduces meta \
+                         integrity tags, and is not something future upgrades will repeat. \
+                         Before migrating, verify the key's current policy looks correct: \
+                         `{app_name} inspect {label}`. To migrate: `{app_name} \
+                         migrate-meta`."
+                    ),
+                })
+            }
+        }
+    }
+}
+
 impl EnclaveSigner for SoftwareSigner {
     fn sign(&self, label: &str, data: &[u8]) -> Result<Vec<u8>> {
         use p256::ecdsa::{signature::Signer, SigningKey};
 
-        // AccessPolicy is stored in key metadata but is not enforced here.
-        // The private key is loaded from the keyring and signs without any
-        // user prompt, regardless of the policy recorded at generation time.
         validate_label(label)?;
+
+        // Per-op trust-anchor check before loading the private key
+        // and producing a signature. On the keyring backend this is
+        // the ONLY enforcement of the policy fields recorded in the
+        // meta — `AccessPolicy` is not enforced at sign time on this
+        // backend, so a same-UID attacker with `.meta` write access
+        // could otherwise change `presence_mode` / `access_policy`
+        // freely. The trust anchor catches that.
+        let dir = self.config.keys_dir();
+        ensure_meta_integrity(&self.config.app_name, label, &dir, self.config.use_keyring)?;
+
         let secret = key_storage::load_secret_key(&self.config, label)?;
         let signing_key = SigningKey::from(&secret);
 

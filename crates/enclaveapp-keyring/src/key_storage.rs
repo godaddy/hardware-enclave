@@ -155,6 +155,42 @@ pub fn meta_hmac_key(_app_name: &str) -> Option<Zeroizing<Vec<u8>>> {
     None
 }
 
+/// Read-only companion to [`meta_hmac_key`] — never calls
+/// `set_secret`, so it is safe from contexts where a Secret Service
+/// write could prompt the user to unlock a locked keyring or fail
+/// silently in a non-interactive session.
+///
+/// Returns `Ok(Some(key))` when the entry is present and well-formed;
+/// `Ok(None)` when the entry has not been created yet (no `Err`
+/// because that's the pre-keygen state and not actionable). Errors
+/// only on a confirmed Secret Service failure that the operator
+/// should see — corrupt entry, daemon crash. The verify path treats
+/// `Err` as fail-open, so consumers should match the macOS / Windows
+/// pattern: map `Err` to "skip verification" rather than refusing
+/// to proceed.
+#[cfg(all(feature = "keyring-storage", target_env = "gnu"))]
+pub fn meta_hmac_key_existing(app_name: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
+    let entry =
+        keyring::Entry::new(app_name, META_HMAC_ACCOUNT).map_err(|e| Error::KeyOperation {
+            operation: "meta_hmac_load".into(),
+            detail: format!("keyring::Entry::new: {e}"),
+        })?;
+    match entry.get_secret() {
+        Ok(bytes) if bytes.len() == 32 => Ok(Some(Zeroizing::new(bytes))),
+        Ok(_) | Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(Error::KeyOperation {
+            operation: "meta_hmac_load".into(),
+            detail: format!("get_secret: {e}"),
+        }),
+    }
+}
+
+#[cfg(not(all(feature = "keyring-storage", target_env = "gnu")))]
+#[allow(dead_code)]
+pub fn meta_hmac_key_existing(_app_name: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
+    Ok(None)
+}
+
 /// Save the private key bytes to a `.key` file, encrypting with a keyring-stored
 /// KEK when `use_keyring` is true. When `use_keyring` is false (testing only),
 /// falls back to unencrypted file storage.
@@ -414,8 +450,19 @@ pub fn generate_and_save(
     // is unavailable (no Secret Service) we fall back to the plain
     // save_meta path — the keyring is strictly weaker than hardware
     // anyway and we document the residual risk.
+    //
+    // `use_keyring=false` (test mode) skips the Secret Service round-
+    // trip entirely. The `keyring` crate's `Entry::get_secret()` /
+    // `set_secret()` blocks indefinitely when no D-Bus session bus
+    // is reachable, which is the default state in non-graphical CI
+    // environments. Production never sets this flag false.
     let meta = KeyMeta::new(label, key_type, policy);
-    match meta_hmac_key(&config.app_name) {
+    let hmac_key_opt = if config.use_keyring {
+        meta_hmac_key(&config.app_name)
+    } else {
+        None
+    };
+    match hmac_key_opt {
         Some(hmac_key) => {
             metadata::save_meta_with_hmac(&dir, label, &meta, hmac_key.as_slice())?;
         }

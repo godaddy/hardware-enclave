@@ -16,6 +16,8 @@
 //! - Hardware security is not available or not required
 
 mod key_storage;
+pub mod meta_migration_marker;
+pub mod meta_tag;
 
 #[cfg(feature = "signing")]
 mod sign;
@@ -29,4 +31,4 @@ pub use sign::SoftwareSigner;
 #[cfg(feature = "encryption")]
 pub use encrypt::SoftwareEncryptor;
 
-pub use key_storage::{has_keyring_feature, is_available, meta_hmac_key};
+pub use key_storage::{has_keyring_feature, is_available, meta_hmac_key, meta_hmac_key_existing};
