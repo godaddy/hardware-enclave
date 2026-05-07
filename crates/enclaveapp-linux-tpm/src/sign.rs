@@ -136,7 +136,11 @@ impl EnclaveKeyManager for LinuxTpmSigner {
         }
         let _lock = DirLock::acquire(&dir)?;
         tpm::rename_key_blobs(&dir, old_label, new_label)?;
-        if let Err(error) = metadata::rename_key_files(&dir, old_label, new_label) {
+        // Linux TPM-backed keys do not write a `.meta.hmac` sidecar
+        // on this branch (the strict-mode HMAC discipline ships only
+        // on the keyring/software backend). Pass `None` for the
+        // hmac_key.
+        if let Err(error) = metadata::rename_key_files(&dir, old_label, new_label, None) {
             // Roll the blob rename back so state stays consistent.
             drop(tpm::rename_key_blobs(&dir, new_label, old_label));
             return Err(error);
