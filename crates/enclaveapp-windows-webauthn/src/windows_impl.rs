@@ -29,7 +29,9 @@ use windows::core::PCWSTR;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Networking::WindowsWebServices::*;
 use windows::Win32::System::Console::GetConsoleWindow;
-use windows::Win32::UI::WindowsAndMessaging::{GetDesktopWindow, GetForegroundWindow};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetDesktopWindow, GetForegroundWindow, IsWindowVisible,
+};
 
 use crate::{Result, WebAuthnAssertion, WebAuthnCredential, WebAuthnError};
 
@@ -306,18 +308,45 @@ fn to_wide(s: &str) -> Vec<u16> {
 }
 
 #[allow(unsafe_code)]
+/// Pick an HWND to parent the Hello dialog to.
+///
+/// Probes (in order): caller-provided HWND, console window,
+/// foreground window, desktop. Each candidate is required to be
+/// **visible** (`IsWindowVisible`) — if the chosen parent is
+/// hidden, Hello renders the dialog parented to a non-displayable
+/// window, the user can't respond to it, and
+/// `WebAuthNAuthenticatorMakeCredential` / `…GetAssertion` block
+/// indefinitely (the dwTimeoutMilliseconds field doesn't trip
+/// once the user has interacted with the dialog at all). Field-
+/// observed when a sshenc matrix run was launched from
+/// `Start-Process -WindowStyle Hidden`: GetConsoleWindow() returned
+/// the hidden parent's HWND, the first dialog squeaked through to
+/// foreground but every subsequent prompt landed on the hidden
+/// parent and the keygen process hung forever.
+///
+/// The desktop fallback is always visible, so we always have a
+/// usable HWND. A caller-provided HWND that fails the visibility
+/// check is swapped for the next candidate rather than respected
+/// blindly — the caller's intent ("parent the dialog HERE")
+/// presumes the parent is displayable; honoring an invisible HWND
+/// just hangs the dialog.
 unsafe fn pick_hwnd(provided: Option<isize>) -> HWND {
-    if let Some(raw) = provided {
-        return HWND(raw as *mut _);
+    let candidates: [HWND; 4] = [
+        provided
+            .map(|raw| HWND(raw as *mut _))
+            .unwrap_or(HWND(std::ptr::null_mut())),
+        GetConsoleWindow(),
+        GetForegroundWindow(),
+        GetDesktopWindow(),
+    ];
+    for candidate in candidates {
+        if !candidate.0.is_null() && IsWindowVisible(candidate).as_bool() {
+            return candidate;
+        }
     }
-    let console_hwnd = GetConsoleWindow();
-    if !console_hwnd.0.is_null() {
-        return console_hwnd;
-    }
-    let foreground_hwnd = GetForegroundWindow();
-    if !foreground_hwnd.0.is_null() {
-        return foreground_hwnd;
-    }
+    // Should be unreachable: GetDesktopWindow is always non-null
+    // and visible. Fall through to it anyway in case Win32 returns
+    // something unexpected.
     GetDesktopWindow()
 }
 
