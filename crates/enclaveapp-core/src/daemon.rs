@@ -52,11 +52,62 @@ pub enum DaemonReadyError {
     SocketDirSetupFailed { parent: PathBuf, reason: String },
     /// The daemon was spawned but did not accept a connection on
     /// `socket_path` before the readiness timeout elapsed.
+    ///
+    /// `diagnostic` carries best-effort capture of why the wait
+    /// failed so callers / log readers can root-cause without
+    /// having to rerun with extra instrumentation. See
+    /// [`ReadyDiagnostic`] for the captured fields.
     NotReady {
         socket_path: PathBuf,
         timeout: Duration,
+        diagnostic: ReadyDiagnostic,
     },
 }
+
+/// Captured state at the moment [`ensure_daemon_ready`] gives up.
+/// Populated on both the "child exited 0 but socket invisible"
+/// path and the full-timeout-elapsed path.
+///
+/// All fields are best-effort — none of the capture steps is
+/// allowed to fail in a way that hides the original timeout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadyDiagnostic {
+    /// `Some(code)` if `try_wait` showed the spawned process had
+    /// exited at the moment we gave up; `None` if it was still
+    /// running. The most useful single bit: "did the daemon die,
+    /// or just never bind?"
+    pub child_exit_code: Option<i32>,
+    /// Whether `socket_path` exists on the filesystem at the
+    /// moment we gave up. `false` for the common "agent never
+    /// reached `bind()`" case; `true` if the socket appeared but
+    /// connect attempts kept failing (a race between bind and
+    /// listen, or a wrong-uid mismatch on the listener).
+    pub socket_present: bool,
+    /// If `socket_present` is true, the io::ErrorKind of the most
+    /// recent connect attempt as a stable string (e.g.
+    /// `"ConnectionRefused"`). `None` if the socket wasn't there
+    /// or the last connect succeeded (in which case we wouldn't
+    /// have reached the `NotReady` path at all).
+    pub connect_error_kind: Option<String>,
+    /// Up to ~8 KiB of the spawned daemon's stderr, captured from
+    /// process startup until the timeout fired. Truncation is
+    /// indicated with a trailing `"\n... (truncated)"` marker. The
+    /// daemon's startup panic / config-error / TPM-init-failure
+    /// almost always lands in this window.
+    pub stderr_excerpt: String,
+}
+
+/// Maximum bytes of spawned-daemon stderr we keep for diagnostic.
+/// 8 KiB is plenty for startup-panic backtraces and tracing init
+/// errors; bigger means our drain thread holds more memory for
+/// the lifetime of every spawned daemon, which is a real cost
+/// because we leave the drain running after success.
+///
+/// Unix-only: the Windows stub of `ensure_daemon_ready` doesn't
+/// spawn anything (named-pipe daemons are managed as Services),
+/// so there's no stderr to capture and the constant is unused.
+#[cfg(unix)]
+const STDERR_DIAGNOSTIC_CAP: usize = 8 * 1024;
 
 impl std::fmt::Display for DaemonReadyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -77,12 +128,33 @@ impl std::fmt::Display for DaemonReadyError {
             Self::NotReady {
                 socket_path,
                 timeout,
-            } => write!(
-                f,
-                "daemon did not become ready at {} within {:?}",
-                socket_path.display(),
-                timeout
-            ),
+                diagnostic,
+            } => {
+                write!(
+                    f,
+                    "daemon did not become ready at {} within {:?}",
+                    socket_path.display(),
+                    timeout
+                )?;
+                let exit_part = match diagnostic.child_exit_code {
+                    Some(code) => format!("child exited (status {code})"),
+                    None => "child still running at timeout".to_string(),
+                };
+                let socket_part = if diagnostic.socket_present {
+                    if let Some(kind) = &diagnostic.connect_error_kind {
+                        format!("socket present but connect failed ({kind})")
+                    } else {
+                        "socket present".to_string()
+                    }
+                } else {
+                    "socket never appeared".to_string()
+                };
+                write!(f, " [{exit_part}; {socket_part}]")?;
+                if !diagnostic.stderr_excerpt.is_empty() {
+                    write!(f, "\nchild stderr:\n{}", diagnostic.stderr_excerpt)?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -161,12 +233,32 @@ pub fn ensure_daemon_ready(
         .arg(socket_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        // Pipe stderr (was: null) so we can capture startup
+        // panics / tracing-subscriber errors / TPM init failures
+        // for the NotReady diagnostic. A drain thread (below)
+        // keeps the kernel pipe buffer from filling and blocking
+        // the daemon's writes; the captured bytes are bounded by
+        // STDERR_DIAGNOSTIC_CAP so memory stays small even for a
+        // long-running daemon.
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| DaemonReadyError::SpawnFailed {
             binary: binary.clone(),
             reason: e.to_string(),
         })?;
+
+    // Spawn the stderr drain. It outlives this function — on the
+    // success path the daemon keeps running and writing stderr;
+    // the drain thread reads-and-bounds-buffer-or-discards forever
+    // (cheap) and exits naturally when the daemon closes its
+    // stderr (i.e. when it dies). The Arc<Mutex<...>> is shared
+    // with this function so we can snapshot the buffer for the
+    // NotReady diagnostic.
+    let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::with_capacity(1024)));
+    if let Some(stderr) = child.stderr.take() {
+        let buf = std::sync::Arc::clone(&stderr_buf);
+        std::thread::spawn(move || drain_capped(stderr, buf));
+    }
 
     // Two readiness signals, polled together:
     //
@@ -209,6 +301,7 @@ pub fn ensure_daemon_ready(
                 return Err(DaemonReadyError::NotReady {
                     socket_path: socket_path.to_path_buf(),
                     timeout: readiness_total_timeout(),
+                    diagnostic: capture_diagnostic(socket_path, Some(status), &stderr_buf),
                 });
             }
             return Err(DaemonReadyError::SpawnFailed {
@@ -221,11 +314,79 @@ pub fn ensure_daemon_ready(
         }
     }
     // Final reap attempt before bailing.
-    drop(child.try_wait());
+    let final_status = child.try_wait().ok().flatten();
     Err(DaemonReadyError::NotReady {
         socket_path: socket_path.to_path_buf(),
         timeout: readiness_total_timeout(),
+        diagnostic: capture_diagnostic(socket_path, final_status, &stderr_buf),
     })
+}
+
+/// Read from `reader` indefinitely. The first
+/// `STDERR_DIAGNOSTIC_CAP` bytes are appended to `buf`; bytes
+/// beyond that are discarded so the daemon's stderr writes don't
+/// block on a full pipe but our memory footprint stays bounded.
+/// Truncation is signaled with a trailing `"\n... (truncated)"`
+/// the first time we hit the cap.
+#[cfg(unix)]
+fn drain_capped<R: std::io::Read>(mut reader: R, buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>) {
+    let mut tmp = [0_u8; 1024];
+    let mut truncation_marked = false;
+    loop {
+        // EOF (Ok(0)) and any read error both mean the drain is
+        // done — the daemon either closed its stderr or the pipe
+        // died — so we collapse to a single arm.
+        let n = match reader.read(&mut tmp) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        let mut guard = match buf.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let remaining = STDERR_DIAGNOSTIC_CAP.saturating_sub(guard.len());
+        if remaining > 0 {
+            let take = remaining.min(n);
+            guard.extend_from_slice(&tmp[..take]);
+        } else if !truncation_marked {
+            guard.extend_from_slice(b"\n... (truncated)");
+            truncation_marked = true;
+        }
+        // Bytes beyond the cap (after the marker) are read-and-discarded
+        // here on purpose — the loop continues so the kernel pipe
+        // doesn't fill up and block the daemon's stderr writes.
+    }
+}
+
+/// Build a [`ReadyDiagnostic`] snapshot from the current state of
+/// the spawn handles + filesystem at the moment we give up. Each
+/// field is best-effort; failure to capture one shouldn't lose the
+/// others.
+#[cfg(unix)]
+fn capture_diagnostic(
+    socket_path: &Path,
+    child_status: Option<std::process::ExitStatus>,
+    stderr_buf: &std::sync::Mutex<Vec<u8>>,
+) -> ReadyDiagnostic {
+    let socket_present = socket_path.exists();
+    let connect_error_kind = if socket_present {
+        match UnixStream::connect(socket_path) {
+            Ok(_) => None, // shouldn't happen — we just checked is_socket_ready=false
+            Err(e) => Some(format!("{:?}", e.kind())),
+        }
+    } else {
+        None
+    };
+    let stderr_excerpt = match stderr_buf.lock() {
+        Ok(g) => String::from_utf8_lossy(&g).into_owned(),
+        Err(p) => String::from_utf8_lossy(&p.into_inner()).into_owned(),
+    };
+    ReadyDiagnostic {
+        child_exit_code: child_status.and_then(|s| s.code()),
+        socket_present,
+        connect_error_kind,
+        stderr_excerpt,
+    }
 }
 
 /// Windows stub: daemons on Windows talk over named pipes, not Unix
@@ -536,5 +697,104 @@ mod tests {
                 .status(),
         );
         let _unused = std::fs::remove_file(&sock);
+    }
+
+    /// The exit-0-without-socket NotReady path captures the
+    /// child's stderr in the diagnostic. A daemon that prints
+    /// "TPM init failed" on stderr and then exits is the exact
+    /// case this exists to root-cause.
+    #[test]
+    fn not_ready_diagnostic_includes_child_stderr_on_exit_zero_path() {
+        let _home_guard = lock_home();
+        let bin_name = format!("eacd-stderr-{}", std::process::id());
+        // Print to stderr, then exit 0 without binding.
+        let script = b"#!/bin/sh\necho 'TPM init failed: bridge unreachable' >&2\nexit 0\n";
+        let _fake = with_fake_home_bin(&bin_name, script);
+        let sock = unique_socket("stderr-exit0");
+        let _unused = std::fs::remove_file(&sock);
+
+        let err = ensure_daemon_ready_etxtbsy_resilient(&bin_name, "myapp", &sock)
+            .expect_err("should fail (no socket)");
+
+        match err {
+            DaemonReadyError::NotReady { diagnostic, .. } => {
+                assert_eq!(
+                    diagnostic.child_exit_code,
+                    Some(0),
+                    "exit-0 path should record the actual exit code"
+                );
+                assert!(
+                    !diagnostic.socket_present,
+                    "socket should not exist (script never bound)"
+                );
+                assert!(
+                    diagnostic
+                        .stderr_excerpt
+                        .contains("TPM init failed: bridge unreachable"),
+                    "stderr_excerpt should contain the script's stderr; got {:?}",
+                    diagnostic.stderr_excerpt
+                );
+            }
+            other => panic!("expected NotReady; got {other:?}"),
+        }
+    }
+
+    /// `Display` for NotReady should embed the diagnostic so log
+    /// readers can root-cause from a single line / message
+    /// without having to introspect the error type.
+    #[test]
+    fn not_ready_display_embeds_diagnostic() {
+        let err = DaemonReadyError::NotReady {
+            socket_path: PathBuf::from("/tmp/x.sock"),
+            timeout: Duration::from_secs(30),
+            diagnostic: ReadyDiagnostic {
+                child_exit_code: None,
+                socket_present: true,
+                connect_error_kind: Some("ConnectionRefused".to_string()),
+                stderr_excerpt: "thread 'main' panicked at 'no key found'".to_string(),
+            },
+        };
+        let s = format!("{err}");
+        assert!(s.contains("/tmp/x.sock"));
+        assert!(s.contains("child still running"));
+        assert!(s.contains("socket present but connect failed"));
+        assert!(s.contains("ConnectionRefused"));
+        assert!(s.contains("no key found"));
+    }
+
+    /// A binary that prints more than `STDERR_DIAGNOSTIC_CAP` bytes
+    /// has its stderr capped with a truncation marker. The test
+    /// uses the exit-0 path because we want a fast failure (vs.
+    /// the full 30 s timeout).
+    #[test]
+    fn not_ready_diagnostic_caps_stderr_at_8kib() {
+        let _home_guard = lock_home();
+        let bin_name = format!("eacd-cap-{}", std::process::id());
+        // Emit ~16 KiB of stderr, then exit 0 without binding.
+        // `yes` would loop forever; cap with `head -c` so the
+        // child actually exits and the test doesn't depend on
+        // racing the drain thread.
+        let script = b"#!/bin/sh\nyes 'aaaaaaaa' | head -c 16384 >&2\nexit 0\n";
+        let _fake = with_fake_home_bin(&bin_name, script);
+        let sock = unique_socket("stderr-cap");
+        let _unused = std::fs::remove_file(&sock);
+
+        let err = ensure_daemon_ready_etxtbsy_resilient(&bin_name, "myapp", &sock)
+            .expect_err("should fail (no socket)");
+
+        match err {
+            DaemonReadyError::NotReady { diagnostic, .. } => {
+                assert!(
+                    diagnostic.stderr_excerpt.len() <= STDERR_DIAGNOSTIC_CAP + 32,
+                    "excerpt should be capped near {STDERR_DIAGNOSTIC_CAP}, got {}",
+                    diagnostic.stderr_excerpt.len()
+                );
+                assert!(
+                    diagnostic.stderr_excerpt.contains("(truncated)"),
+                    "excerpt should carry the truncation marker"
+                );
+            }
+            other => panic!("expected NotReady; got {other:?}"),
+        }
     }
 }
