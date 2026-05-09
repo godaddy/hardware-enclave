@@ -380,53 +380,52 @@ fn install_linux_release(
         spec.repo, spec.tag, asset
     );
 
-    // Curl the tarball, untar into a fresh per-PID work dir, sudo
-    // cp listed binaries to /usr/local/bin, chmod +x. All in one
-    // bash invocation so the installer runs in a single subprocess
-    // per distro.
+    // Curl the tarball, untar into a per-PID work dir, atomically
+    // replace the binaries under /usr/local/bin/. All in one bash
+    // invocation so the installer runs in a single subprocess per
+    // distro.
+    //
+    // Atomic rename rather than `cp` in place: writing over a
+    // running ELF returns ETXTBSY on Linux ("text file busy"). The
+    // previous mitigation tried `pkill -x sshenc-agent` before
+    // `cp`, but in practice it was unreliable — on some distros
+    // (`pgrep -x` doesn't match its own running agent on
+    // AlmaLinux 9; pkill leaves siblings alive on Debian under
+    // some race), so the `cp` still hit ETXTBSY and the user saw
+    // a misleading "(network? release missing?)" warning. The
+    // rename pattern (`cp src dst.tmp && mv dst.tmp dst`) sidesteps
+    // the issue entirely: rename(2) atomically swaps the path
+    // entry, leaving any running process with the old inode
+    // (which lives until that process exits) and pointing all
+    // future invocations at the new file. No kernel text-page
+    // conflict, no install failure.
     //
     // Using a fixed `/tmp/sshenc-install-$$` rather than mktemp:
     // mktemp under `wsl bash -c` was observed to silently land in
-    // `cd ""` on some distros (Ubuntu / Debian / Fedora /
-    // AlmaLinux), at which point `tar` extracted into `$HOME` and
-    // collided with existing files. The `$$` shell PID is
-    // sufficient namespace for a single-shot install command.
-    //
-    // `rm -rf` before `mkdir` so a previous failed run can't leave
-    // a dirty dir behind. `set -e` after the cleanup so the cleanup
-    // itself can't fail us out.
+    // `cd ""` on some distros, at which point `tar` extracted into
+    // `$HOME` and collided with existing files.
     let bins = spec.binaries.join(" ");
-    // Stop any running daemons first — `cp` against a running ELF
-    // returns ETXTBSY ("text file busy"). Match by process name
-    // *only* (`pkill -x` exact, no `-f` cmdline-match): the script
-    // we hand to `bash -c` contains the binary names as substrings
-    // of its own argv, so `pkill -f sshenc-agent` would also kill
-    // this bash, which exits 15 and the install gets reported as a
-    // failure even when the binaries did install successfully.
-    // `pkill -x` matches `/proc/$pid/comm` which is the basename of
-    // the executable, never the cmdline arguments.
-    //
-    // `pkill` returns 1 when no process matched. That's fine —
-    // silence its exit code with `; ` separators (each step in the
-    // teardown is independent), then `set -e` only after we get
-    // into the install proper.
     let script = format!(
-        "pkill -x sshenc-agent 2>/dev/null \
-         ; sleep 1 \
-         ; rm -rf /tmp/sshenc-install-$$ \
+        "rm -rf /tmp/sshenc-install-$$ \
          && mkdir -p /tmp/sshenc-install-$$ \
          && cd /tmp/sshenc-install-$$ \
          && set -e \
          && trap 'rm -rf /tmp/sshenc-install-$$' EXIT \
          && curl -fsSL '{url}' -o release.tar.gz \
          && tar xzf release.tar.gz \
-         && sudo cp {bins} /usr/local/bin/ \
-         && for b in {bins}; do sudo chmod +x /usr/local/bin/\"$b\"; done"
+         && for b in {bins}; do \
+              sudo cp \"$b\" \"/usr/local/bin/$b.new\" \
+              && sudo chmod +x \"/usr/local/bin/$b.new\" \
+              && sudo mv \"/usr/local/bin/$b.new\" \"/usr/local/bin/$b\"; \
+            done \
+         ; pkill -KILL -x sshenc-agent 2>/dev/null || true"
     );
     let mut cmd = std::process::Command::new("wsl");
     cmd.args(["-d", distro_name, "--", "bash", "-c", &script]);
-    match enclaveapp_core::timeout::run_status_with_timeout(cmd, WSL_DEP_INSTALL_TIMEOUT) {
-        Ok(enclaveapp_core::timeout::TimeoutResult::Completed(s)) if s.success() => {
+    match enclaveapp_core::timeout::run_with_timeout(cmd, WSL_DEP_INSTALL_TIMEOUT) {
+        Ok(enclaveapp_core::timeout::TimeoutResult::Completed(output))
+            if output.status.success() =>
+        {
             actions.push(format!(
                 "Installed {} from {} {}",
                 spec.binaries.join(", "),
@@ -443,11 +442,41 @@ fn install_linux_release(
             ));
             Ok(())
         }
-        _ => {
+        Ok(enclaveapp_core::timeout::TimeoutResult::Completed(output)) => {
+            // Non-zero exit. Surface the actual stderr (last few
+            // lines, trimmed) instead of the old "(network? release
+            // missing?)" guess that masked the real failure for
+            // operators trying to diagnose a stuck distro.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let tail: Vec<&str> = stderr
+                .lines()
+                .rev()
+                .filter(|l| !l.trim().is_empty())
+                .take(3)
+                .collect();
+            let detail: String = tail.into_iter().rev().collect::<Vec<_>>().join(" / ");
+            let exit = output
+                .status
+                .code()
+                .map(|c| format!("exit {c}"))
+                .unwrap_or_else(|| "signaled".to_string());
             actions.push(format!(
-                "Warning: could not install {} from {} (network? release missing?)",
+                "Warning: failed to install {} from {} ({}: {})",
                 spec.binaries.join(", "),
-                url
+                url,
+                exit,
+                if detail.is_empty() {
+                    "no stderr"
+                } else {
+                    detail.as_str()
+                }
+            ));
+            Ok(())
+        }
+        Err(e) => {
+            actions.push(format!(
+                "Warning: failed to launch wsl install for {} ({e})",
+                spec.binaries.join(", "),
             ));
             Ok(())
         }
