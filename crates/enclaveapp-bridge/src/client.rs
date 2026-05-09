@@ -17,10 +17,23 @@ use std::time::Duration;
 /// Maximum response size from the bridge (64 KB).
 const MAX_BRIDGE_RESPONSE_BYTES: usize = 64 * 1024;
 
-/// Default timeout for a single bridge request/response cycle. Covers
-/// TPM operations including biometric prompts (Windows Hello can take
-/// up to ~60s in practice). Override via `ENCLAVEAPP_BRIDGE_TIMEOUT_SECS`.
-const DEFAULT_BRIDGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+/// Default timeout for a single bridge request/response cycle.
+///
+/// 240 s — sized to cover four overlapping cold-start cases without
+/// erroring:
+///
+/// 1. TPM service warmup (5–30 s typical, up to ~60 s on contended
+///    boxes). The Windows TBS service may not be running yet on first
+///    call after boot or after a Hyper-V cycle.
+/// 2. Windows Hello / biometric prompt (up to ~60 s in practice while
+///    the user finds their security key, fingerprint, or PIN).
+/// 3. Authenticode verification + first-time process spawn on a cold
+///    disk (antivirus on-access scan, slow disk).
+/// 4. Some combination of the above on the same call.
+///
+/// Override via `ENCLAVEAPP_BRIDGE_TIMEOUT_SECS` for pathological
+/// hardware.
+const DEFAULT_BRIDGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(240);
 
 /// Timeout for bridge shutdown (after we close stdin, it should exit promptly).
 const BRIDGE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
