@@ -7,19 +7,33 @@
 use crate::protocol::*;
 use enclaveapp_core::timeout::{wait_with_timeout, LineReaderWithTimeout, TimeoutResult};
 use enclaveapp_core::{AccessPolicy, Result};
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 /// Maximum response size from the bridge (64 KB).
 const MAX_BRIDGE_RESPONSE_BYTES: usize = 64 * 1024;
 
-/// Default timeout for a single bridge request/response cycle. Covers
-/// TPM operations including biometric prompts (Windows Hello can take
-/// up to ~60s in practice). Override via `ENCLAVEAPP_BRIDGE_TIMEOUT_SECS`.
-const DEFAULT_BRIDGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+/// Default timeout for a single bridge request/response cycle.
+///
+/// 240 s — sized to cover four overlapping cold-start cases without
+/// erroring:
+///
+/// 1. TPM service warmup (5–30 s typical, up to ~60 s on contended
+///    boxes). The Windows TBS service may not be running yet on first
+///    call after boot or after a Hyper-V cycle.
+/// 2. Windows Hello / biometric prompt (up to ~60 s in practice while
+///    the user finds their security key, fingerprint, or PIN).
+/// 3. Authenticode verification + first-time process spawn on a cold
+///    disk (antivirus on-access scan, slow disk).
+/// 4. Some combination of the above on the same call.
+///
+/// Override via `ENCLAVEAPP_BRIDGE_TIMEOUT_SECS` for pathological
+/// hardware.
+const DEFAULT_BRIDGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(240);
 
 /// Timeout for bridge shutdown (after we close stdin, it should exit promptly).
 const BRIDGE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -337,38 +351,6 @@ impl BridgeSession {
 
         Ok(response)
     }
-
-    fn finish(mut self) -> Result<()> {
-        drop(self.child.stdin.take());
-        // Give the bridge a bounded window to exit cleanly after stdin close.
-        // If it hangs (e.g. wedged TPM state), kill it rather than blocking forever.
-        let status = match wait_with_timeout(&mut self.child, BRIDGE_SHUTDOWN_TIMEOUT)
-            .map_err(enclaveapp_core::Error::Io)?
-        {
-            TimeoutResult::Completed(status) => status,
-            TimeoutResult::TimedOut => {
-                drop(self.child.kill());
-                drop(self.child.wait());
-                self.finished = true;
-                return Err(enclaveapp_core::Error::KeyOperation {
-                    operation: "bridge_shutdown".into(),
-                    detail: format!(
-                        "bridge did not exit within {}s after stdin close",
-                        BRIDGE_SHUTDOWN_TIMEOUT.as_secs()
-                    ),
-                });
-            }
-        };
-        self.finished = true;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(enclaveapp_core::Error::KeyOperation {
-                operation: "bridge".into(),
-                detail: format!("bridge exited with status {status}"),
-            })
-        }
-    }
 }
 
 impl Drop for BridgeSession {
@@ -376,59 +358,113 @@ impl Drop for BridgeSession {
         if self.finished {
             return;
         }
+        // Close stdin first: the bridge protocol exits cleanly on
+        // EOF, and waiting for that beats SIGKILL when feasible.
+        // We bound the wait so a wedged TPM op can't pin us.
         drop(self.child.stdin.take());
+        match wait_with_timeout(&mut self.child, BRIDGE_SHUTDOWN_TIMEOUT) {
+            Ok(TimeoutResult::Completed(_)) => {
+                self.finished = true;
+                return;
+            }
+            Ok(TimeoutResult::TimedOut) | Err(_) => {
+                // Fall through to kill.
+            }
+        }
         drop(self.child.kill());
         drop(self.child.wait());
+        self.finished = true;
     }
 }
 
-fn finish_session<T>(session: BridgeSession, result: Result<T>) -> Result<T> {
-    let finish_result = session.finish();
-    match (result, finish_result) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+/// Process-shared map of `bridge_path` → persistent session.
+///
+/// Each entry is a `Mutex<Option<BridgeSession>>` shared via `Arc`.
+/// The `Option` holds the (lazily-spawned) child process; `None`
+/// before first use, after a session error that forced a respawn,
+/// or after the subprocess died. The `Mutex` serializes calls
+/// against a single bridge subprocess (same UX semantics as the
+/// previous `BRIDGE_SESSION_LOCK` — Windows Hello prompts must not
+/// race; TPM key slot contention; interleaved-stderr ambiguity).
+///
+/// Why per-path rather than truly global: a single process could in
+/// principle have multiple distinct bridge installs reachable
+/// (e.g. a sshenc + an awsenc both exposing their own bridge.exe).
+/// Serializing per-path lets independent bridges run in parallel
+/// while a single bridge's calls remain ordered. In practice every
+/// known consumer uses one path per process, so this collapses to
+/// the same behavior as the previous global lock.
+///
+/// The bridge subprocess is **persistent across calls** within a
+/// process (the architectural change in this commit). Previously
+/// every `call_bridge` / `call_bridge_after_init` spawned a fresh
+/// `sshenc-tpm-bridge.exe`, paying the WSL→Windows interop +
+/// TPM-service warmup cost on every call. With the persistent
+/// session, the subprocess is spawned once on first call and
+/// reused — agent-side bridge ops drop from "5-10s cold first
+/// call, ~50ms warm thereafter" to "5-10s once at first call,
+/// effectively zero subprocess overhead thereafter."
+///
+/// Server-side state across multiple `init` calls on the same
+/// connection: handle_request in enclaveapp-tpm-bridge replaces
+/// `Option<TpmStorage>` on each `init`, so reusing the connection
+/// across different (app, label, policy) tuples is safe.
+///
+/// On any session error (subprocess died, IO failure, request
+/// timeout fired and killed the child), the `Option` is cleared
+/// and the next call will respawn. Callers retry exactly once
+/// per call so a transient subprocess loss is invisible.
+type PersistentSessionMap = HashMap<PathBuf, Arc<Mutex<Option<BridgeSession>>>>;
+static PERSISTENT_BRIDGES: OnceLock<Mutex<PersistentSessionMap>> = OnceLock::new();
+
+/// Get-or-create the per-path persistent session handle. Map lock
+/// is held briefly (just to look up / insert); the per-path session
+/// mutex is what serializes actual calls.
+fn persistent_session(bridge_path: &Path) -> Arc<Mutex<Option<BridgeSession>>> {
+    let map = PERSISTENT_BRIDGES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = match map.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    guard
+        .entry(bridge_path.to_path_buf())
+        .or_insert_with(|| Arc::new(Mutex::new(None)))
+        .clone()
+}
+
+fn lock_session(
+    arc: &Arc<Mutex<Option<BridgeSession>>>,
+) -> std::sync::MutexGuard<'_, Option<BridgeSession>> {
+    match arc.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
     }
 }
 
-/// Process-wide serialization around bridge sessions.
-///
-/// The WSL→Windows bridge is a JSON-RPC child process. Two threads in
-/// the same client process that simultaneously spawn independent
-/// sessions would: (a) race Windows Hello prompts against each other
-/// so the user sees two back-to-back biometric dialogs, (b) contend
-/// for the same TPM key slot on the server side, and (c) produce
-/// indistinguishable interleaved stderr if anything goes wrong. The
-/// bridge server itself serializes per-session, but each session
-/// costs a child-process spawn and a biometric prompt — we'd rather
-/// just not do two at once.
-///
-/// This mutex is held for the full lifetime of a single session
-/// (spawn → request(s) → shutdown). It's deliberately unconditional:
-/// the overhead is a single uncontended lock acquisition per call,
-/// and bridge operations are already in the tens-of-ms / TPM-op
-/// range where lock overhead is noise.
-///
-/// A `PoisonError` from a prior panicked session is recovered with
-/// `into_inner()` — the next session starts fresh, and panics in
-/// one session's child/pipe handling should not wedge the whole
-/// client for the process's lifetime.
-static BRIDGE_SESSION_LOCK: Mutex<()> = Mutex::new(());
-
-/// Acquire the process-wide bridge-session lock, transparently
-/// recovering from poisoning.
-fn bridge_session_lock() -> std::sync::MutexGuard<'static, ()> {
-    match BRIDGE_SESSION_LOCK.lock() {
-        Ok(guard) => guard,
-        Err(poison) => poison.into_inner(),
-    }
-}
-
-/// Call the bridge with a request and return the response.
+/// Send `request` over the persistent bridge session for
+/// `bridge_path`. Spawns a fresh session if none exists. Retries
+/// exactly once (with a freshly spawned session) if the existing
+/// session errors — covers the case where a previous request's
+/// timeout killed the subprocess or the subprocess crashed
+/// between calls.
 pub fn call_bridge(bridge_path: &Path, request: &BridgeRequest) -> Result<BridgeResponse> {
-    let _guard = bridge_session_lock();
-    let mut session = BridgeSession::spawn(bridge_path)?;
-    let response = session.request(request);
-    finish_session(session, response)
+    let session_arc = persistent_session(bridge_path);
+    let mut guard = lock_session(&session_arc);
+    let mut last_err: Option<enclaveapp_core::Error> = None;
+    for _attempt in 0..2 {
+        if guard.is_none() {
+            *guard = Some(BridgeSession::spawn(bridge_path)?);
+        }
+        match guard.as_mut().expect("just-spawned").request(request) {
+            Ok(resp) => return Ok(resp),
+            Err(e) => {
+                // Drop the dead session. Drop impl kills + waits.
+                drop(guard.take());
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.expect("retry loop never recorded an error"))
 }
 
 fn init_request(app_name: &str, key_label: &str, access_policy: AccessPolicy) -> BridgeRequest {
@@ -443,6 +479,9 @@ fn init_request(app_name: &str, key_label: &str, access_policy: AccessPolicy) ->
     }
 }
 
+/// Send `init` then `request` atomically against the same
+/// persistent session. Same retry semantics as `call_bridge`:
+/// one transparent re-spawn-and-retry on session-level errors.
 fn call_bridge_after_init(
     bridge_path: &Path,
     app_name: &str,
@@ -450,15 +489,29 @@ fn call_bridge_after_init(
     access_policy: AccessPolicy,
     request: &BridgeRequest,
 ) -> Result<BridgeResponse> {
-    let _guard = bridge_session_lock();
-    let mut session = BridgeSession::spawn(bridge_path)?;
-    let response = (|| -> Result<BridgeResponse> {
-        session
-            .request(&init_request(app_name, key_label, access_policy))?
-            .require_ok("bridge_init")?;
-        session.request(request)
-    })();
-    finish_session(session, response)
+    let session_arc = persistent_session(bridge_path);
+    let mut guard = lock_session(&session_arc);
+    let mut last_err: Option<enclaveapp_core::Error> = None;
+    for _attempt in 0..2 {
+        if guard.is_none() {
+            *guard = Some(BridgeSession::spawn(bridge_path)?);
+        }
+        let session = guard.as_mut().expect("just-spawned");
+        let result = (|| -> Result<BridgeResponse> {
+            session
+                .request(&init_request(app_name, key_label, access_policy))?
+                .require_ok("bridge_init")?;
+            session.request(request)
+        })();
+        match result {
+            Ok(resp) => return Ok(resp),
+            Err(e) => {
+                drop(guard.take());
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.expect("retry loop never recorded an error"))
 }
 
 /// Initialize the bridge-side key lifecycle for a specific app/label pair.
@@ -567,15 +620,31 @@ fn call_bridge_after_signing_init(
     access_policy: AccessPolicy,
     request: &BridgeRequest,
 ) -> Result<BridgeResponse> {
-    let _guard = bridge_session_lock();
-    let mut session = BridgeSession::spawn(bridge_path)?;
-    let response = (|| -> Result<BridgeResponse> {
-        session
-            .request(&init_signing_request(app_name, key_label, access_policy))?
-            .require_ok("bridge_init_signing")?;
-        session.request(request)
-    })();
-    finish_session(session, response)
+    // Same pattern as call_bridge_after_init: persistent session +
+    // one retry on session-level error.
+    let session_arc = persistent_session(bridge_path);
+    let mut guard = lock_session(&session_arc);
+    let mut last_err: Option<enclaveapp_core::Error> = None;
+    for _attempt in 0..2 {
+        if guard.is_none() {
+            *guard = Some(BridgeSession::spawn(bridge_path)?);
+        }
+        let session = guard.as_mut().expect("just-spawned");
+        let result = (|| -> Result<BridgeResponse> {
+            session
+                .request(&init_signing_request(app_name, key_label, access_policy))?
+                .require_ok("bridge_init_signing")?;
+            session.request(request)
+        })();
+        match result {
+            Ok(resp) => return Ok(resp),
+            Err(e) => {
+                drop(guard.take());
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.expect("retry loop never recorded an error"))
 }
 
 /// Initialize the bridge-side signing key lifecycle for a specific app/label pair.
@@ -1277,118 +1346,6 @@ printf '{"result":"","error":null}\n'
 
     #[cfg(unix)]
     #[test]
-    fn concurrent_call_bridge_serializes_via_session_lock() {
-        // Two threads calling `call_bridge` against a script that
-        // records the time it took the request to arrive and holds
-        // open stdin for ~150 ms. If the client-side lock actually
-        // serializes, the second call's "arrival" happens AFTER the
-        // first call's "exit". We assert that by checking the
-        // timestamps written to two disjoint sentinel files — their
-        // non-overlapping `started`/`finished` intervals prove
-        // serialization even though both threads raced to start.
-        let _outer = SCRIPT_TEST_MUTEX.lock().unwrap();
-
-        let marker_dir = std::env::temp_dir().join(format!(
-            "enclaveapp-bridge-concurrent-{}-{}",
-            std::process::id(),
-            SCRIPT_COUNTER.fetch_add(1, Ordering::SeqCst)
-        ));
-        fs::create_dir_all(&marker_dir).unwrap();
-        let marker_arg = marker_dir.display().to_string();
-
-        let script_body = r#"#!/bin/sh
-marker_dir="$1"
-pid=$$
-started="$marker_dir/started.$pid"
-finished="$marker_dir/finished.$pid"
-date +%s%N > "$started"
-read request_line
-sleep 0.15
-printf '{"result":"","error":null}\n'
-date +%s%N > "$finished"
-"#;
-        let script = temp_script("concurrent-session.sh", script_body);
-        // Wrap the script so each invocation receives the marker_dir as $1.
-        let wrapper_path = std::env::temp_dir().join(format!(
-            "enclaveapp-bridge-concurrent-wrapper-{}-{}.sh",
-            std::process::id(),
-            SCRIPT_COUNTER.fetch_add(1, Ordering::SeqCst)
-        ));
-        fs::write(
-            &wrapper_path,
-            format!("#!/bin/sh\nexec {} {}\n", script.display(), marker_arg),
-        )
-        .unwrap();
-        let mut perms = fs::metadata(&wrapper_path).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&wrapper_path, perms).unwrap();
-
-        let wrapper_a = wrapper_path.clone();
-        let wrapper_b = wrapper_path.clone();
-        let handle_a = std::thread::spawn(move || {
-            let req = BridgeRequest {
-                method: "encrypt".to_string(),
-                params: BridgeParams::new(
-                    "aGVsbG8=".into(),
-                    AccessPolicy::None,
-                    "t".into(),
-                    "k".into(),
-                ),
-            };
-            call_bridge(&wrapper_a, &req).unwrap();
-        });
-        let handle_b = std::thread::spawn(move || {
-            // Tiny jitter so the two threads don't both lose to the
-            // fastest-scheduled one before the first spawn.
-            std::thread::sleep(Duration::from_millis(10));
-            let req = BridgeRequest {
-                method: "encrypt".to_string(),
-                params: BridgeParams::new(
-                    "Y2lwaGVy".into(),
-                    AccessPolicy::None,
-                    "t".into(),
-                    "k".into(),
-                ),
-            };
-            call_bridge(&wrapper_b, &req).unwrap();
-        });
-        handle_a.join().unwrap();
-        handle_b.join().unwrap();
-
-        // Read all started/finished timestamps and confirm the two
-        // sessions' intervals do not overlap.
-        let mut started: Vec<u128> = Vec::new();
-        let mut finished: Vec<u128> = Vec::new();
-        for entry in fs::read_dir(&marker_dir).unwrap() {
-            let entry = entry.unwrap();
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let content = fs::read_to_string(entry.path()).unwrap();
-            let ts: u128 = content.trim().parse().unwrap();
-            if name.starts_with("started.") {
-                started.push(ts);
-            } else if name.starts_with("finished.") {
-                finished.push(ts);
-            }
-        }
-        assert_eq!(started.len(), 2, "expected two sessions to have started");
-        assert_eq!(finished.len(), 2, "expected two sessions to have finished");
-        started.sort_unstable();
-        finished.sort_unstable();
-        // First session fully finishes before the second session starts.
-        assert!(
-            finished[0] <= started[1],
-            "sessions overlapped: finished[0]={} started[1]={} — client-side lock did not serialize",
-            finished[0],
-            started[1]
-        );
-
-        drop(fs::remove_dir_all(&marker_dir));
-        cleanup_script(&script);
-        drop(fs::remove_file(&wrapper_path));
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn bridge_session_drop_kills_child() {
         let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
         let script = temp_script("drop-kill.sh", "#!/bin/sh\nwhile true; do sleep 1; done\n");
@@ -1467,39 +1424,6 @@ esac
         let err = call_bridge(&script, &request).unwrap_err();
         assert!(err.to_string().contains("bridge response"));
         cleanup_script(&script);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn bridge_delete_reaps_child_after_error_response() {
-        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
-        let sentinel = std::env::temp_dir().join(format!(
-            "enclaveapp-bridge-test-sentinel-{}-{}",
-            std::process::id(),
-            SCRIPT_COUNTER.fetch_add(1, Ordering::SeqCst)
-        ));
-        drop(fs::remove_file(&sentinel));
-        let script = temp_script(
-            "delete-error.sh",
-            &format!(
-                r#"#!/bin/sh
-sentinel="{}"
-trap 'printf done > "$sentinel"' EXIT
-read request_line
-printf '{{"result":null,"error":"boom"}}\n'
-while IFS= read -r _line; do :; done
-"#,
-                sentinel.display()
-            ),
-        );
-        let error = bridge_destroy(&script, "awsenc", "cache-key").unwrap_err();
-        assert!(error.to_string().contains("boom"));
-        assert!(
-            sentinel.exists(),
-            "bridge process should be reaped before returning"
-        );
-        cleanup_script(&script);
-        drop(fs::remove_file(sentinel));
     }
 
     // ----- Signing bridge client tests -----
