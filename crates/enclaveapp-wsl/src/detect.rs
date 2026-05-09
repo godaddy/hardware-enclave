@@ -109,7 +109,7 @@ pub(crate) fn linux_home(distro: &str) -> Option<String> {
     use enclaveapp_core::timeout::{run_with_timeout, TimeoutResult};
     use std::time::Duration;
     let mut cmd = std::process::Command::new("wsl");
-    cmd.args(["-d", distro, "--", "sh", "-lc", r#"printf '%s' "$HOME""#]);
+    cmd.args(["-d", distro, "-e", "sh", "-lc", r#"printf '%s' "$HOME""#]);
     let output = match run_with_timeout(cmd, Duration::from_secs(15)) {
         Ok(TimeoutResult::Completed(o)) => o,
         _ => return None,

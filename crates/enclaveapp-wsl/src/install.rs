@@ -323,7 +323,7 @@ fn copy_linux_binary(
     if let Some(linux_home) = find_linux_home(distro_name) {
         let linux_path = format!("{linux_home}/{target}");
         let mut cmd = std::process::Command::new("wsl");
-        cmd.args(["-d", distro_name, "--", "chmod", "+x", &linux_path]);
+        cmd.args(["-d", distro_name, "-e", "chmod", "+x", &linux_path]);
         drop(enclaveapp_core::timeout::run_status_with_timeout(
             cmd,
             WSL_QUICK_CMD_TIMEOUT,
@@ -343,7 +343,7 @@ fn copy_linux_binary(
 #[cfg(target_os = "windows")]
 fn distro_is_glibc(distro_name: &str) -> bool {
     let mut wsl = std::process::Command::new("wsl");
-    wsl.args(["-d", distro_name, "--", "ldd", "--version"]);
+    wsl.args(["-d", distro_name, "-e", "ldd", "--version"]);
     match enclaveapp_core::timeout::run_with_timeout(wsl, WSL_QUICK_CMD_TIMEOUT) {
         Ok(enclaveapp_core::timeout::TimeoutResult::Completed(o)) => {
             let stdout = String::from_utf8_lossy(&o.stdout);
@@ -434,8 +434,20 @@ fn install_linux_release(
          done\n\
          pkill -KILL -x sshenc-agent 2>/dev/null || true\n"
     );
+    // `-e bash -c <script>` rather than `-- bash -c <script>`: the
+    // `--` form runs the user's login shell as the wrapper, and
+    // empirically that wrapper performs a layer of variable
+    // expansion against ITS environment before bash -c sees the
+    // script. So `foo=bar; echo "$foo"` arrives at bash as
+    // `foo=bar; echo ""` and the install silently no-ops on every
+    // path that depends on a script-local variable.
+    // `-e <prog> <args>` execs `<prog>` directly without the login
+    // shell wrapper, so bash -c sees the script intact and `$foo`
+    // expands at the bash level as intended. Repro:
+    //   wsl -d <distro> -- bash -c 'foo=bar; echo "[$foo]"' -> "[]"
+    //   wsl -d <distro> -e bash -c 'foo=bar; echo "[$foo]"' -> "[bar]"
     let mut cmd = std::process::Command::new("wsl");
-    cmd.args(["-d", distro_name, "--", "bash", "-c", &script]);
+    cmd.args(["-d", distro_name, "-e", "bash", "-c", &script]);
     match enclaveapp_core::timeout::run_with_timeout(cmd, WSL_DEP_INSTALL_TIMEOUT) {
         Ok(enclaveapp_core::timeout::TimeoutResult::Completed(output))
             if output.status.success() =>
