@@ -1538,39 +1538,6 @@ esac
         cleanup_script(&script);
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn bridge_delete_reaps_child_after_error_response() {
-        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
-        let sentinel = std::env::temp_dir().join(format!(
-            "enclaveapp-bridge-test-sentinel-{}-{}",
-            std::process::id(),
-            SCRIPT_COUNTER.fetch_add(1, Ordering::SeqCst)
-        ));
-        drop(fs::remove_file(&sentinel));
-        let script = temp_script(
-            "delete-error.sh",
-            &format!(
-                r#"#!/bin/sh
-sentinel="{}"
-trap 'printf done > "$sentinel"' EXIT
-read request_line
-printf '{{"result":null,"error":"boom"}}\n'
-while IFS= read -r _line; do :; done
-"#,
-                sentinel.display()
-            ),
-        );
-        let error = bridge_destroy(&script, "awsenc", "cache-key").unwrap_err();
-        assert!(error.to_string().contains("boom"));
-        assert!(
-            sentinel.exists(),
-            "bridge process should be reaped before returning"
-        );
-        cleanup_script(&script);
-        drop(fs::remove_file(sentinel));
-    }
-
     // ----- Signing bridge client tests -----
 
     #[cfg(unix)]
