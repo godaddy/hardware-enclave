@@ -12,8 +12,8 @@
 //! consuming app's name so the per-platform install-dir conventions
 //! can flex:
 //!
-//! - Unix: current-exe sibling, `~/.local/bin`, `~/.cargo/bin`,
-//!   `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`.
+//! - Unix: `~/.local/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`,
+//!   `/usr/local/bin`, `/usr/bin`, then current-exe sibling as fallback.
 //! - Windows: current-exe sibling,
 //!   `%LOCALAPPDATA%\<app_name>\bin`,
 //!   `%ProgramFiles%\<app_name>`,
@@ -21,10 +21,18 @@
 //!
 //! PATH is **deliberately excluded** — an attacker who controls the
 //! user's PATH shouldn't be able to smuggle a fake daemon binary
-//! into a position where enclaveapp launches it. Discovered
-//! candidates are also canonicalized (symlinks resolved) and checked
-//! for an executable bit before we commit to them, which closes the
-//! symlink-swap TOCTOU window.
+//! into a position where enclaveapp launches it.
+//!
+//! ## Stable vs. canonical paths
+//!
+//! Candidates are validated via `canonicalize()` (symlinks resolved) to
+//! confirm they are real executables, but the **original pre-canonicalized
+//! path is returned**. This ensures callers receive a stable, upgrade-
+//! surviving path (e.g. `/opt/homebrew/bin/sshenc`) rather than a
+//! version-pinned Cellar path (e.g. `.../Cellar/sshenc/0.6.74/…/sshenc`)
+//! that breaks when Homebrew removes the old version. Stable dirs are
+//! searched before the current-exe sibling so that production Homebrew
+//! or system installs are preferred over versioned side-by-side directories.
 
 use std::path::PathBuf;
 
@@ -71,14 +79,15 @@ impl BinaryDiscoveryContext {
 fn candidate_dirs(context: &BinaryDiscoveryContext, app_name: &str) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
-    if let Some(current_exe) = context.current_exe.as_ref() {
-        if let Some(parent) = current_exe.parent() {
-            dirs.push(parent.to_path_buf());
-        }
-    }
-
     #[cfg(windows)]
     {
+        // On Windows keep current-exe sibling first: Scoop's `current`
+        // junction and MSI installs put sibling binaries next to each other.
+        if let Some(current_exe) = context.current_exe.as_ref() {
+            if let Some(parent) = current_exe.parent() {
+                dirs.push(parent.to_path_buf());
+            }
+        }
         if let Some(local_app_data) = context.local_app_data.as_ref() {
             dirs.push(local_app_data.join(app_name).join("bin"));
         }
@@ -95,6 +104,9 @@ fn candidate_dirs(context: &BinaryDiscoveryContext, app_name: &str) -> Vec<PathB
     #[cfg(not(windows))]
     {
         let _ = app_name;
+        // Stable dirs first so callers receive an upgrade-surviving symlink
+        // path (e.g. /opt/homebrew/bin/sshenc) rather than a versioned Cellar
+        // path that breaks when Homebrew removes the old version.
         if let Some(home_dir) = context.home_dir.as_ref() {
             dirs.push(home_dir.join(".local").join("bin"));
             dirs.push(home_dir.join(".cargo").join("bin"));
@@ -102,6 +114,13 @@ fn candidate_dirs(context: &BinaryDiscoveryContext, app_name: &str) -> Vec<PathB
         dirs.push(PathBuf::from("/opt/homebrew/bin"));
         dirs.push(PathBuf::from("/usr/local/bin"));
         dirs.push(PathBuf::from("/usr/bin"));
+        // current-exe sibling last: fallback for dev builds or installs in
+        // non-standard locations not covered by the dirs above.
+        if let Some(current_exe) = context.current_exe.as_ref() {
+            if let Some(parent) = current_exe.parent() {
+                dirs.push(parent.to_path_buf());
+            }
+        }
     }
 
     let mut unique_dirs = Vec::new();
@@ -143,13 +162,16 @@ pub fn find_trusted_binary(binary_name: &str, app_name: &str) -> Option<PathBuf>
     find_trusted_binary_with_context(binary_name, app_name, &BinaryDiscoveryContext::current())
 }
 
-/// Resolve a candidate path to its canonical (symlink-resolved) form
-/// and verify it is a trusted executable. Returning the canonical
-/// path eliminates symlink-swap TOCTOU tricks.
+/// Validate a candidate path by resolving it canonically, then return
+/// the original (pre-canonicalized) path if it passes. Validation uses
+/// the canonical form to confirm the binary really exists and is
+/// executable; returning the original path ensures callers get a
+/// stable, symlink-bearing path (e.g. `/opt/homebrew/bin/sshenc`)
+/// that survives Homebrew upgrades rather than a pinned Cellar path.
 fn resolve_trusted_binary_candidate(path: &std::path::Path) -> Option<PathBuf> {
     let resolved = path.canonicalize().ok()?;
     if resolved.is_file() && candidate_looks_executable(&resolved) {
-        Some(resolved)
+        Some(path.to_path_buf())
     } else {
         None
     }
@@ -217,7 +239,10 @@ mod tests {
     }
 
     #[test]
-    fn prefers_current_exe_sibling() {
+    fn finds_current_exe_sibling_as_fallback() {
+        // When the binary only exists next to current_exe (not in any of
+        // the stable dirs), the current-exe sibling is found as a fallback
+        // and the original (non-canonicalized) path is returned.
         let root = test_dir("sibling");
         let bin_dir = root.join("bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
@@ -247,7 +272,8 @@ mod tests {
 
         let found =
             find_trusted_binary_with_context(binary_name, "myapp", &context).expect("found");
-        assert_eq!(found, sibling.canonicalize().unwrap());
+        // Returns the original candidate path, not the canonicalized form.
+        assert_eq!(found, sibling);
 
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -278,11 +304,11 @@ mod tests {
 
             let a_found = find_trusted_binary_with_context("helper.exe", "appA", &context)
                 .expect("find appA's helper");
-            assert_eq!(a_found, bin_a.canonicalize().unwrap());
+            assert_eq!(a_found, bin_a);
 
             let b_found = find_trusted_binary_with_context("helper.exe", "appB", &context)
                 .expect("find appB's helper");
-            assert_eq!(b_found, bin_b.canonicalize().unwrap());
+            assert_eq!(b_found, bin_b);
 
             std::fs::remove_dir_all(&root).unwrap();
         }
