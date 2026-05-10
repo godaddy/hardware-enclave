@@ -92,16 +92,16 @@ private var lacontextNextToken: UInt64 = 0
 @_cdecl("enclaveapp_se_lacontext_create")
 public func enclaveapp_se_lacontext_create(
     _ ttl_secs: Double,
-    _ app_name_ptr: UnsafePointer<UInt8>?,
-    _ app_name_len: Int32
+    _ reason_ptr: UnsafePointer<UInt8>?,
+    _ reason_len: Int32
 ) -> UInt64 {
     let ctx = LAContext()
     ctx.touchIDAuthenticationAllowableReuseDuration = max(0.0, ttl_secs)
-    let appName: String
-    if let ptr = app_name_ptr, app_name_len > 0 {
-        appName = String(decoding: UnsafeBufferPointer(start: ptr, count: Int(app_name_len)), as: UTF8.self)
+    let reason: String
+    if let ptr = reason_ptr, reason_len > 0 {
+        reason = String(decoding: UnsafeBufferPointer(start: ptr, count: Int(reason_len)), as: UTF8.self)
     } else {
-        appName = "this app"
+        reason = "Authenticate to use your Secure Enclave keys."
     }
 
     // `canEvaluatePolicy` rejects the call with an explicit error
@@ -127,7 +127,7 @@ public func enclaveapp_se_lacontext_create(
     var authed = false
     ctx.evaluatePolicy(
         .deviceOwnerAuthentication,
-        localizedReason: "Authenticate to use your Secure Enclave keys for \(appName)."
+        localizedReason: reason
     ) { success, evalError in
         authed = success
         if !success, let err = evalError {

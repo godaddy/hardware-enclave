@@ -42,14 +42,14 @@ pub(crate) struct LaContextHandle {
 
 impl LaContextHandle {
     #[allow(unsafe_code)] // FFI call to Swift LAContext registry
-    fn new(app_name: &str, ttl: Duration) -> Option<Self> {
+    fn new(reason: &str, ttl: Duration) -> Option<Self> {
         let secs = ttl.as_secs_f64();
-        let app_name_len = i32::try_from(app_name.len()).ok()?;
-        // SAFETY: FFI to Swift bridge. `app_name` is passed as a borrowed
+        let reason_len = i32::try_from(reason.len()).ok()?;
+        // SAFETY: FFI to Swift bridge. `reason` is passed as a borrowed
         // byte slice for the duration of the call; Swift copies it before
         // returning and never retains the pointer.
         let token =
-            unsafe { ffi::enclaveapp_se_lacontext_create(secs, app_name.as_ptr(), app_name_len) };
+            unsafe { ffi::enclaveapp_se_lacontext_create(secs, reason.as_ptr(), reason_len) };
         if token == 0 {
             None
         } else {
@@ -100,7 +100,16 @@ fn registry() -> &'static Mutex<HashMap<RegistryKey, Arc<LaContextHandle>>> {
 /// Look up or create the cached `LaContextHandle` for the given key.
 /// Returns `None` if `ttl_secs == 0` (caller should pass token 0
 /// instead — equivalent to "no context").
-pub(crate) fn acquire(app_name: &str, label: &str, ttl_secs: u64) -> Option<Arc<LaContextHandle>> {
+///
+/// `reason` is shown verbatim in the Touch ID dialog when a fresh
+/// LAContext must be created (cache miss or TTL expiry). Cache hits
+/// return the existing handle regardless of the `reason` value.
+pub(crate) fn acquire(
+    app_name: &str,
+    label: &str,
+    ttl_secs: u64,
+    reason: &str,
+) -> Option<Arc<LaContextHandle>> {
     if ttl_secs == 0 {
         return None;
     }
@@ -121,10 +130,21 @@ pub(crate) fn acquire(app_name: &str, label: &str, ttl_secs: u64) -> Option<Arc<
         guard.remove(&key);
     }
 
-    let handle = LaContextHandle::new(app_name, ttl)?;
+    let handle = LaContextHandle::new(reason, ttl)?;
     let arc = Arc::new(handle);
     guard.insert(key, Arc::clone(&arc));
     Some(arc)
+}
+
+/// Create a one-shot `LaContextHandle` that is NOT stored in the
+/// registry. Used for `PresenceMode::Strict` to show a per-sign
+/// Touch ID prompt with a descriptive reason string. The returned
+/// handle must be kept alive until the sign operation completes.
+pub(crate) fn create_once(reason: &str) -> Option<LaContextHandle> {
+    // Short TTL: just long enough to complete a single sign call.
+    // Not stored in the registry — dropped (and released) by the
+    // caller immediately after the sign completes.
+    LaContextHandle::new(reason, Duration::from_secs(5))
 }
 
 /// Drop the cached `LaContextHandle` for the given key, if any. Called
@@ -157,6 +177,6 @@ mod tests {
     #[test]
     fn ttl_zero_returns_none() {
         // Doesn't touch FFI — short-circuits before the Swift call.
-        assert!(acquire("test_app", "test_label_zero", 0).is_none());
+        assert!(acquire("test_app", "test_label_zero", 0, "test reason").is_none());
     }
 }

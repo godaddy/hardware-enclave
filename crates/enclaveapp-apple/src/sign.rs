@@ -131,15 +131,25 @@ impl EnclaveSigner for SecureEnclaveSigner {
         data: &[u8],
         mode: PresenceMode,
         cache_ttl_secs: u64,
+        reason: &str,
     ) -> Result<Vec<u8>> {
-        let token = match mode {
+        match mode {
             PresenceMode::Cached => {
-                lacontext::acquire(&self.config.app_name, label, cache_ttl_secs)
-                    .map(|h| h.token())
-                    .unwrap_or(0)
+                let token =
+                    lacontext::acquire(&self.config.app_name, label, cache_ttl_secs, reason)
+                        .map(|h| h.token())
+                        .unwrap_or(0);
+                self.sign_inner(label, data, token)
             }
-            PresenceMode::Strict | PresenceMode::None => 0,
-        };
-        self.sign_inner(label, data, token)
+            PresenceMode::Strict => {
+                // Create a one-shot LAContext so the user sees a descriptive
+                // reason string instead of the generic SE prompt. The handle
+                // must stay alive across sign_inner; it's dropped on return.
+                let handle = lacontext::create_once(reason);
+                let token = handle.as_ref().map(|h| h.token()).unwrap_or(0);
+                self.sign_inner(label, data, token)
+            }
+            PresenceMode::None => self.sign_inner(label, data, 0),
+        }
     }
 }

@@ -40,13 +40,14 @@ extern "C" {
 
     /// Allocate a fresh `LAContext` with `touchIDAuthenticationAllowableReuseDuration`
     /// set to `ttl_secs` and register it in the Swift-side handle table. The
-    /// app name is used only for the user-visible authentication reason. Returns
-    /// the opaque token (always > 0) on success, or 0 on failure. Token 0 is a
-    /// sentinel meaning "no context, prompt every sign."
+    /// `reason` string is shown verbatim in the Touch ID dialog as
+    /// `localizedReason`. Returns the opaque token (always > 0) on success,
+    /// or 0 on failure. Token 0 is a sentinel meaning "no context, prompt
+    /// every sign."
     pub fn enclaveapp_se_lacontext_create(
         ttl_secs: f64,
-        app_name: *const u8,
-        app_name_len: i32,
+        reason: *const u8,
+        reason_len: i32,
     ) -> u64;
 
     /// Drop the `LAContext` referenced by `token`, invalidating any cached

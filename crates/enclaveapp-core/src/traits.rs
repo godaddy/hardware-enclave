@@ -77,9 +77,13 @@ pub trait EnclaveSigner: EnclaveKeyManager {
     /// (`PresenceMode::Strict`), or not required at all (`PresenceMode::None`).
     /// `cache_ttl_secs == 0` collapses `Cached` into `Strict`.
     ///
-    /// The default impl ignores `mode` and `cache_ttl_secs` and falls back
-    /// to [`sign`]. Only macOS overrides this; it batches Touch ID prompts
-    /// within `cache_ttl_secs` when `PresenceMode::Cached`.
+    /// `reason` is shown verbatim in the Touch ID / biometric dialog as the
+    /// `localizedReason`. Callers should include context like the operation
+    /// type and key label, e.g. `"sshenc: sign git commit (work-key)"`.
+    ///
+    /// The default impl ignores `mode`, `cache_ttl_secs`, and `reason` and
+    /// falls back to [`sign`]. Only macOS overrides this; it batches Touch ID
+    /// prompts within `cache_ttl_secs` when `PresenceMode::Cached`.
     ///
     /// Linux TPM and software backends keep the default. Neither enforces
     /// user presence at sign time — `AccessPolicy` is stored in key metadata
@@ -92,8 +96,9 @@ pub trait EnclaveSigner: EnclaveKeyManager {
         data: &[u8],
         mode: PresenceMode,
         cache_ttl_secs: u64,
+        reason: &str,
     ) -> Result<Vec<u8>> {
-        let _ = (mode, cache_ttl_secs);
+        let _ = (mode, cache_ttl_secs, reason);
         self.sign(label, data)
     }
 }
