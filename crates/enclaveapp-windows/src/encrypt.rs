@@ -176,20 +176,42 @@ impl EnclaveKeyManager for TpmEncryptor {
         let dir = self.keys_dir();
         let provider = provider::open_provider()?;
         let state = state::KeyMaterialState::acquire(&dir)?;
+        let silent = self.hello_gate_enabled();
         state.ensure_label_available(label, || {
-            match key::open_key(&provider, &self.app_name, label) {
+            let open_result = if silent {
+                key::open_key_silent(&provider, &self.app_name, label)
+            } else {
+                key::open_key(&provider, &self.app_name, label)
+            };
+            match open_result {
                 Ok(_key) => Ok(state::AuthoritativeKeyState::Present),
                 Err(Error::KeyNotFound { .. }) => Ok(state::AuthoritativeKeyState::Missing),
                 Err(error) => Err(error),
             }
         })?;
-        let (_key_handle, pub_key) = key::create_key(
-            &provider,
-            &self.app_name,
-            label,
-            ECDH_P256_ALGORITHM,
-            policy,
-        )?;
+        // When the Hello soft-gate is enabled, use the silent KSP path:
+        // the KSP must not surface its own legacy CryptUI dialog --
+        // we'll surface Hello via UserConsentVerifier ourselves. If
+        // the KSP would need UI it returns NTE_SILENT_CONTEXT, which
+        // we let bubble up as a hard failure rather than fall back
+        // to a surprise password prompt.
+        let (_key_handle, pub_key) = if silent {
+            key::create_key_silent(
+                &provider,
+                &self.app_name,
+                label,
+                ECDH_P256_ALGORITHM,
+                policy,
+            )?
+        } else {
+            key::create_key(
+                &provider,
+                &self.app_name,
+                label,
+                ECDH_P256_ALGORITHM,
+                policy,
+            )?
+        };
 
         state.persist_generated_key(label, key_type, policy, &pub_key, || {
             key::delete_key(&self.app_name, label)
@@ -287,7 +309,16 @@ impl EnclaveEncryptor for TpmEncryptor {
         let tag = &ct_and_tag[ct_and_tag.len() - GCM_TAG_SIZE..];
 
         let provider = provider::open_provider()?;
-        let key_handle = key::open_key(&provider, &self.app_name, label)?;
+        // When the Hello soft-gate is configured, open the key with
+        // NCRYPT_SILENT_FLAG so the KSP cannot surface a legacy
+        // dialog if its policy state is somehow inconsistent with our
+        // expectation. The Hello prompt fires below via
+        // `ensure_hello_verified` -- that is the only UI we permit.
+        let key_handle = if self.hello_gate.is_some() {
+            key::open_key_silent(&provider, &self.app_name, label)?
+        } else {
+            key::open_key(&provider, &self.app_name, label)?
+        };
 
         // Re-verify the key's NCRYPT_UI_POLICY matches metadata's
         // AccessPolicy before decrypt. Catches an attacker-planted

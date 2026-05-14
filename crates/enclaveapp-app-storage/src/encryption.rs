@@ -157,8 +157,25 @@ impl AppEncryptionStorage {
         // See `enclaveapp_windows::hello_gate` for the documented
         // threat-model trade-off and `StorageConfig::prefer_windows_hello_ux`
         // for the per-app opt-in semantics.
+        //
+        // If the caller also passed a non-None AccessPolicy, log the
+        // downgrade explicitly. The combination is permitted (callers
+        // get soft Hello gating, not hardware-enforced biometric) but
+        // it should be visible in audit logs so a misconfigured app
+        // doesn't believe it's getting more than it asked for.
         let (effective_policy, hello_gate) = if config.prefer_windows_hello_ux {
             let gate = std::sync::Arc::new(enclaveapp_windows::hello_gate::HelloGate::new());
+            if config.access_policy != AccessPolicy::None {
+                tracing::info!(
+                    app = %config.app_name,
+                    requested_policy = ?config.access_policy,
+                    "prefer_windows_hello_ux: TPM key created without NCRYPT_UI_PROTECT_KEY_FLAG \
+                     and on-disk AccessPolicy recorded as None; Hello consent is enforced at the \
+                     application level via UserConsentVerifier (soft gate). The caller-requested \
+                     AccessPolicy is honored only as a UX intent signal, not as an OS-mediated \
+                     hardware policy."
+                );
+            }
             (AccessPolicy::None, Some(gate))
         } else {
             (config.access_policy, None)

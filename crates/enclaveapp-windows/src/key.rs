@@ -33,6 +33,35 @@ pub fn create_key(
     algorithm: &str,
     policy: AccessPolicy,
 ) -> Result<(NcryptHandle, Vec<u8>)> {
+    create_key_with_flags(provider, app_name, label, algorithm, policy, NCRYPT_FLAGS::default())
+}
+
+/// Like [`create_key`] but with `NCRYPT_SILENT_FLAG` set on
+/// `NCryptCreatePersistedKey` and `NCryptFinalizeKey`. This tells the
+/// KSP it MUST NOT surface its own UI; if it would need to, the call
+/// fails with `NTE_SILENT_CONTEXT` (0x80090022). Use this from the
+/// `prefer_windows_hello_ux` path where the application supplies
+/// Hello UX via `UserConsentVerifier` instead of the legacy CryptUI
+/// dialog -- failing closed is preferable to a surprise password
+/// prompt from the KSP.
+pub fn create_key_silent(
+    provider: &NcryptHandle,
+    app_name: &str,
+    label: &str,
+    algorithm: &str,
+    policy: AccessPolicy,
+) -> Result<(NcryptHandle, Vec<u8>)> {
+    create_key_with_flags(provider, app_name, label, algorithm, policy, NCRYPT_SILENT_FLAG)
+}
+
+fn create_key_with_flags(
+    provider: &NcryptHandle,
+    app_name: &str,
+    label: &str,
+    algorithm: &str,
+    policy: AccessPolicy,
+    flags: NCRYPT_FLAGS,
+) -> Result<(NcryptHandle, Vec<u8>)> {
     let name = key_name(app_name, label);
     let name_wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
     let algo_wide: Vec<u16> = algorithm.encode_utf16().chain(std::iter::once(0)).collect();
@@ -45,7 +74,7 @@ pub fn create_key(
             PCWSTR(algo_wide.as_ptr()),
             PCWSTR(name_wide.as_ptr()),
             CERT_KEY_SPEC::default(),
-            NCRYPT_FLAGS::default(),
+            flags,
         )
         .map_err(|e| Error::GenerateFailed {
             detail: format!("NCryptCreatePersistedKey: {e}"),
@@ -70,13 +99,20 @@ pub fn create_key(
     // user-mode and hookable by an attacker with code execution as
     // the user. Apps that want hardware-enforced Hello biometric
     // UX use `enclaveapp-windows-webauthn` (TPM via NGC) instead.
+    //
+    // Apps that opt into `StorageConfig::prefer_windows_hello_ux`
+    // pass `AccessPolicy::None` here and gate via the application-
+    // level `hello_gate::HelloGate` -- see the file-on-disk threat
+    // model in libenclaveapp's THREAT_MODEL.md.
     if policy != AccessPolicy::None {
         set_ui_policy(&key, policy)?;
     }
 
-    // Persist the key to the TPM.
+    // Persist the key to the TPM. Inherit `flags` so callers using
+    // NCRYPT_SILENT_FLAG fail closed (NTE_SILENT_CONTEXT) rather than
+    // let the KSP show its own dialog.
     unsafe {
-        NCryptFinalizeKey(key.as_key(), NCRYPT_FLAGS::default()).map_err(|e| {
+        NCryptFinalizeKey(key.as_key(), flags).map_err(|e| {
             Error::GenerateFailed {
                 detail: format!("NCryptFinalizeKey: {e}"),
             }
@@ -89,6 +125,21 @@ pub fn create_key(
 
 /// Open an existing TPM-backed key by application name and label.
 pub fn open_key(provider: &NcryptHandle, app_name: &str, label: &str) -> Result<NcryptHandle> {
+    open_key_with_flags(provider, app_name, label, NCRYPT_FLAGS::default())
+}
+
+/// Like [`open_key`] but with `NCRYPT_SILENT_FLAG` set. See
+/// [`create_key_silent`] for rationale.
+pub fn open_key_silent(provider: &NcryptHandle, app_name: &str, label: &str) -> Result<NcryptHandle> {
+    open_key_with_flags(provider, app_name, label, NCRYPT_SILENT_FLAG)
+}
+
+fn open_key_with_flags(
+    provider: &NcryptHandle,
+    app_name: &str,
+    label: &str,
+    flags: NCRYPT_FLAGS,
+) -> Result<NcryptHandle> {
     let name = key_name(app_name, label);
     let name_wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
     let mut key_handle = NCRYPT_KEY_HANDLE::default();
@@ -98,7 +149,7 @@ pub fn open_key(provider: &NcryptHandle, app_name: &str, label: &str) -> Result<
             &mut key_handle,
             PCWSTR(name_wide.as_ptr()),
             CERT_KEY_SPEC::default(),
-            NCRYPT_FLAGS::default(),
+            flags,
         )
         .map_err(|_| Error::KeyNotFound {
             label: label.to_string(),

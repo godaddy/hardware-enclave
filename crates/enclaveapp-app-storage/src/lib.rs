@@ -132,22 +132,45 @@ pub struct StorageConfig {
     /// - The TPM encryption key is created WITHOUT `NCRYPT_UI_PROTECT_KEY_FLAG`,
     ///   so the OS does not surface the legacy password dialog at finalize
     ///   or at sign/decrypt time.
+    /// - `NCryptCreatePersistedKey`, `NCryptFinalizeKey`, and `NCryptOpenKey`
+    ///   are all invoked with `NCRYPT_SILENT_FLAG` so the KSP cannot
+    ///   surface its own UI; if it would need to, the call fails with
+    ///   `NTE_SILENT_CONTEXT` rather than showing a surprise dialog.
     /// - Each encrypt and decrypt is gated by
     ///   `Windows.Security.Credentials.UI.UserConsentVerifier.RequestVerificationAsync(...)`,
     ///   which fires the modern Windows Hello biometric/PIN UI.
     /// - The verification is cached for `wrapping_key_cache_ttl` so repeated
     ///   operations within the window do not re-prompt.
     ///
-    /// **Threat-model trade-off:** The `Verified` Boolean returned by
-    /// `UserConsentVerifier` is a user-mode result consumed by the calling
-    /// process. A same-UID attacker with code execution inside the host
-    /// process can hook the Boolean and bypass the gate; the Hello prompt
-    /// would never need to fire. This is materially weaker than the legacy
-    /// `NCRYPT_UI_PROTECT_KEY_FLAG` path, where the dialog is mediated
-    /// out-of-process by `consent.exe`. Apps that opt in are choosing
-    /// **Hello UX over hard-gate threat model** — appropriate when the
-    /// encrypted material is short-lived, auto-rotated, or the threat
-    /// model accepts same-UID equivalence.
+    /// **AccessPolicy override:** When this flag is `true` the
+    /// [`StorageConfig::access_policy`] field is **overridden to
+    /// `AccessPolicy::None` at the OS-level key creation step**
+    /// (the on-disk meta records `None`). The Hello consent prompt is
+    /// the application-level access enforcement; the TPM key itself
+    /// carries no OS-mediated UI policy. Callers that pass
+    /// `BiometricOnly` together with `prefer_windows_hello_ux: true`
+    /// are getting **soft Hello gating, not hardware-enforced
+    /// biometric**. That trade-off is intentional and is logged at
+    /// `tracing::info` level so the override is auditable.
+    ///
+    /// **Threat-model target:** *same-UID file-on-disk attackers*
+    /// (backup tools, AV upload agents, OneDrive sync of the profile
+    /// dir, accidental git commits, colleagues `cat`-ing the
+    /// credential file, supply-chain dependencies that scan `$HOME`).
+    /// The TPM-resident wrapping key makes the on-disk ciphertext
+    /// useless without invoking the TPM operation on the original
+    /// machine while authenticated as the original user. A stolen
+    /// file is just ciphertext. This is a major upgrade over the
+    /// `chmod 0600` posture that preceded it.
+    ///
+    /// **Out of scope:** same-UID active malware (code execution as
+    /// the same user). `UserConsentVerifier`'s `Verified` Boolean is
+    /// a user-mode result consumed by the calling process; same-UID
+    /// code can hook it or call `NCryptSecretAgreement` on the TPM
+    /// key directly. That attacker class has higher-leverage paths
+    /// regardless (reading process memory after legitimate unlock,
+    /// keystroke capture, etc.), so the soft gate is a UX consent
+    /// signal, not a hard cryptographic boundary against malware.
     ///
     /// No-op on non-Windows platforms. Default: `false`.
     pub prefer_windows_hello_ux: bool,
