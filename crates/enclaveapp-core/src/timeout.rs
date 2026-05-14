@@ -577,6 +577,29 @@ mod tests {
         drop(child.wait());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn run_status_with_timeout_completes_fast_command() {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "exit 0"]);
+        let result = run_status_with_timeout(cmd, Duration::from_secs(5)).unwrap();
+        match result {
+            TimeoutResult::Completed(status) => assert!(status.success()),
+            TimeoutResult::TimedOut => panic!("fast command should not time out"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_status_with_timeout_kills_slow_command() {
+        let start = Instant::now();
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "sleep 10"]);
+        let result = run_status_with_timeout(cmd, Duration::from_millis(200)).unwrap();
+        assert!(result.is_timed_out());
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
     #[test]
     fn line_reader_eof_disconnects_and_returns_empty_string() {
         // An immediately-empty reader causes the background thread to hit EOF
