@@ -864,15 +864,15 @@ jobs:
               # (which lacks the default user session domain that plain
               # `launchctl stop` targets). No-op if the LaunchAgent has not been
               # installed yet.
-              plist = "\#{Dir.home}/Library/LaunchAgents/com.godaddy.\#{name}.agent.plist"
+              plist = "#{Dir.home}/Library/LaunchAgents/com.godaddy.#{name}.agent.plist"
               if File.exist?(plist)
                 uid = Process.uid.to_s
-                system "launchctl", "kickstart", "-k", "gui/\#{uid}/com.godaddy.\#{name}.agent"
+                system "launchctl", "kickstart", "-k", "gui/#{uid}/com.godaddy.#{name}.agent"
               end
             end
 
             test do
-              assert_match "${app}", shell_output("\#{bin}/${app} --help 2>&1", 2)
+              assert_match "${app}", shell_output("#{bin}/${app} --help 2>&1", 2)
             end
           end
           FORMULA
