@@ -377,6 +377,83 @@ mod tests {
     }
 
     #[test]
+    fn missing_config_override_when_none_used_with_temp_materialized_config() {
+        // ConfigOverride::None is not valid for TempMaterializedConfig —
+        // the launcher would have nowhere to write the path.
+        let spec = AppSpec {
+            display_name: "no-override".into(),
+            executable_name: "no-override".into(),
+            supported_integrations: vec![IntegrationType::TempMaterializedConfig],
+            config_override: ConfigOverride::None,
+        };
+
+        let error = prepare_app_launch(
+            &spec,
+            resolved_program(),
+            Vec::new(),
+            IntegrationPayload::TempMaterializedConfig {
+                config_bytes: b"token=abc\n".to_vec(),
+                env_overrides: BTreeMap::new(),
+            },
+        )
+        .expect_err("ConfigOverride::None with TempMaterializedConfig must fail");
+
+        assert!(
+            matches!(error, AdapterError::MissingConfigOverride),
+            "expected MissingConfigOverride, got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn helper_tool_selected_first_when_all_three_integrations_supported() {
+        // The priority order is HelperTool > EnvInterpolation > TempMaterializedConfig.
+        // When all three are both supported and available, HelperTool must win.
+        let spec = AppSpec {
+            display_name: "all-three".into(),
+            executable_name: "all-three".into(),
+            supported_integrations: vec![
+                IntegrationType::HelperTool,
+                IntegrationType::EnvInterpolation,
+                IntegrationType::TempMaterializedConfig,
+            ],
+            config_override: ConfigOverride::EnvironmentVariable {
+                name: "CONFIG".into(),
+            },
+        };
+
+        let prepared = prepare_best_app_launch(
+            &spec,
+            resolved_program(),
+            Vec::new(),
+            IntegrationCandidates {
+                helper_tool: Some(IntegrationPayload::HelperTool {
+                    env_overrides: BTreeMap::from([("HELPER_SOCKET".into(), "/sock".into())]),
+                    extra_args: Vec::new(),
+                }),
+                env_interpolation: Some(IntegrationPayload::EnvInterpolation {
+                    config_bytes: None,
+                    env_overrides: BTreeMap::new(),
+                }),
+                temp_materialized_config: Some(IntegrationPayload::TempMaterializedConfig {
+                    config_bytes: b"token=mat\n".to_vec(),
+                    env_overrides: BTreeMap::new(),
+                }),
+            },
+        )
+        .expect("should succeed");
+
+        // HelperTool path: no temp file, has HELPER_SOCKET override.
+        assert!(
+            prepared.temp_config_path.is_none(),
+            "HelperTool should not produce a temp config"
+        );
+        assert!(
+            prepared.launch.env_overrides.contains_key("HELPER_SOCKET"),
+            "HelperTool override must be present"
+        );
+    }
+
+    #[test]
     fn best_launch_errors_when_no_candidate_matches() {
         let spec = AppSpec {
             display_name: "helper-only".into(),
@@ -403,5 +480,88 @@ mod tests {
             error,
             AdapterError::NoAvailableIntegrationCandidate
         ));
+    }
+
+    #[test]
+    fn integration_candidates_default_has_no_payloads() {
+        let candidates = IntegrationCandidates::default();
+        assert!(candidates.helper_tool.is_none());
+        assert!(candidates.env_interpolation.is_none());
+        assert!(candidates.temp_materialized_config.is_none());
+    }
+
+    #[test]
+    fn integration_payload_equality_same_helper_tool_payloads() {
+        let a = IntegrationPayload::HelperTool {
+            env_overrides: BTreeMap::from([("K".into(), "V".into())]),
+            extra_args: vec!["--flag".into()],
+        };
+        let b = IntegrationPayload::HelperTool {
+            env_overrides: BTreeMap::from([("K".into(), "V".into())]),
+            extra_args: vec!["--flag".into()],
+        };
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn integration_payload_inequality_different_variants() {
+        let helper = IntegrationPayload::HelperTool {
+            env_overrides: BTreeMap::new(),
+            extra_args: Vec::new(),
+        };
+        let env_interp = IntegrationPayload::EnvInterpolation {
+            config_bytes: None,
+            env_overrides: BTreeMap::new(),
+        };
+        assert_ne!(helper, env_interp);
+    }
+
+    #[test]
+    fn prepared_launch_without_temp_config_has_no_temp_config_path() {
+        let spec = AppSpec {
+            display_name: "tool".into(),
+            executable_name: "tool".into(),
+            supported_integrations: vec![IntegrationType::HelperTool],
+            config_override: ConfigOverride::None,
+        };
+        let prepared = prepare_app_launch(
+            &spec,
+            resolved_program(),
+            Vec::new(),
+            IntegrationPayload::HelperTool {
+                env_overrides: BTreeMap::new(),
+                extra_args: Vec::new(),
+            },
+        )
+        .unwrap();
+        let (launch, temp_path, temp_config) = prepared.into_parts();
+        assert!(temp_path.is_none());
+        assert!(temp_config.is_none());
+        assert!(launch.env_removals.is_empty());
+        assert!(launch.env_scrub_patterns.is_empty());
+    }
+
+    #[test]
+    fn env_interpolation_without_config_bytes_produces_no_temp_file() {
+        let spec = AppSpec {
+            display_name: "npm".into(),
+            executable_name: "npm".into(),
+            supported_integrations: vec![IntegrationType::EnvInterpolation],
+            config_override: ConfigOverride::EnvironmentVariable {
+                name: "NPM_CONFIG_USERCONFIG".into(),
+            },
+        };
+        let prepared = prepare_app_launch(
+            &spec,
+            resolved_program(),
+            vec!["install".into()],
+            IntegrationPayload::EnvInterpolation {
+                config_bytes: None,
+                env_overrides: BTreeMap::from([("NPM_TOKEN".into(), "tok".into())]),
+            },
+        )
+        .unwrap();
+        assert!(prepared.temp_config_path.is_none());
+        assert!(prepared.launch.env_overrides.contains_key("NPM_TOKEN"));
     }
 }

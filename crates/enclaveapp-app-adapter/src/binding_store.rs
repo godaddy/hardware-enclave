@@ -456,4 +456,211 @@ mod tests {
 
         assert_eq!(a, b);
     }
+
+    // --- JsonFileBindingStore CRUD tests ---
+
+    fn make_record(id: &str) -> BindingRecord {
+        BindingRecord {
+            id: BindingId::new(id),
+            label: format!("label-{id}"),
+            target: "https://example.com/".into(),
+            secret_env_var: "SECRET_VAR".into(),
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    fn file_store(dir: &TempDir) -> JsonFileBindingStore {
+        JsonFileBindingStore::at_path(dir.path().join("bindings.json"))
+    }
+
+    #[test]
+    fn json_store_persistence_round_trip() {
+        let dir = TempDir::new().expect("temp dir");
+        let store = file_store(&dir);
+        let rec = make_record("npm:default");
+        store.upsert(rec.clone()).expect("upsert");
+
+        let fresh = file_store(&dir);
+        let loaded = fresh.get(&rec.id).expect("get").expect("record");
+        assert_eq!(loaded, rec);
+    }
+
+    #[test]
+    fn json_store_list_returns_all_records() {
+        let dir = TempDir::new().expect("temp dir");
+        let store = file_store(&dir);
+        store.upsert(make_record("a")).expect("upsert a");
+        store.upsert(make_record("b")).expect("upsert b");
+        store.upsert(make_record("c")).expect("upsert c");
+        let list = store.list().expect("list");
+        assert_eq!(list.len(), 3);
+    }
+
+    #[test]
+    fn json_store_list_on_empty_directory_returns_empty_vec() {
+        let dir = TempDir::new().expect("temp dir");
+        let store = file_store(&dir);
+        assert!(store.list().expect("list").is_empty());
+    }
+
+    #[test]
+    fn json_store_get_nonexistent_returns_none() {
+        let dir = TempDir::new().expect("temp dir");
+        let store = file_store(&dir);
+        let id = BindingId::new("npm:ghost");
+        assert!(store.get(&id).expect("get").is_none());
+    }
+
+    #[test]
+    fn json_store_delete_removes_record() {
+        let dir = TempDir::new().expect("temp dir");
+        let store = file_store(&dir);
+        let rec = make_record("npm:del");
+        store.upsert(rec.clone()).expect("upsert");
+        assert!(store.delete(&rec.id).expect("delete"));
+        assert!(store.get(&rec.id).expect("get after delete").is_none());
+        assert!(store.list().expect("list after delete").is_empty());
+    }
+
+    #[test]
+    fn json_store_delete_nonexistent_returns_false() {
+        let dir = TempDir::new().expect("temp dir");
+        let store = file_store(&dir);
+        let id = BindingId::new("npm:never-existed");
+        assert!(!store.delete(&id).expect("delete non-existent"));
+    }
+
+    #[test]
+    fn json_store_mutate_applies_and_persists_change() {
+        let dir = TempDir::new().expect("temp dir");
+        let store = file_store(&dir);
+        let mut rec = make_record("npm:mutate");
+        store.upsert(rec.clone()).expect("upsert");
+
+        store
+            .mutate::<(), _>(|records| {
+                if let Some(r) = records.iter_mut().find(|r| r.id == rec.id) {
+                    r.label = "mutated-label".into();
+                }
+                Ok(())
+            })
+            .expect("mutate");
+
+        rec.label = "mutated-label".into();
+        let loaded = store.get(&rec.id).expect("get").expect("record");
+        assert_eq!(loaded.label, "mutated-label");
+    }
+
+    #[test]
+    fn json_store_mutate_nonexistent_id_leaves_store_unchanged() {
+        let dir = TempDir::new().expect("temp dir");
+        let store = file_store(&dir);
+        store.upsert(make_record("npm:present")).expect("upsert");
+
+        // Mutate that searches for a non-existent id is a no-op, not an error.
+        let result = store.mutate::<(), _>(|records| {
+            if let Some(r) = records.iter_mut().find(|r| r.id == BindingId::new("npm:ghost")) {
+                r.label = "changed".into();
+            }
+            Ok(())
+        });
+        assert!(result.is_ok());
+        assert_eq!(store.list().expect("list").len(), 1);
+    }
+
+    #[test]
+    fn json_store_upsert_overwrites_existing_record() {
+        let dir = TempDir::new().expect("temp dir");
+        let store = file_store(&dir);
+        let mut rec = make_record("npm:upsert");
+        store.upsert(rec.clone()).expect("first upsert");
+        rec.label = "updated-label".into();
+        store.upsert(rec.clone()).expect("second upsert");
+        let list = store.list().expect("list");
+        assert_eq!(list.len(), 1, "upsert must not duplicate the record");
+        assert_eq!(list[0].label, "updated-label");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn json_store_creates_parent_dir_with_restricted_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().expect("temp dir");
+        let nested = dir.path().join("nested-dir");
+        let store = JsonFileBindingStore::at_path(nested.join("bindings.json"));
+        store.upsert(make_record("npm:perm-test")).expect("upsert");
+        let meta = fs::metadata(&nested).expect("metadata");
+        assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+    }
+
+    /// A truncated (corrupt) JSON file on disk must produce a parse error on
+    /// all access paths — no panic. Deleting the corrupt file restores normal
+    /// operation.
+    #[test]
+    fn json_store_corrupt_file_returns_error_no_panic() {
+        let dir = TempDir::new().expect("temp dir");
+        let store = file_store(&dir);
+        // Seed a valid record so the file exists.
+        store.upsert(make_record("npm:seed")).expect("upsert seed");
+        // Overwrite with truncated / invalid JSON.
+        fs::write(store.path.clone(), b"{[broken json").expect("corrupt");
+
+        // get / list / upsert must all return errors, not panic.
+        assert!(store.list().is_err(), "list on corrupt file must return Err");
+        assert!(
+            store.get(&BindingId::new("npm:seed")).is_err(),
+            "get on corrupt file must return Err"
+        );
+        assert!(
+            store.upsert(make_record("npm:new")).is_err(),
+            "upsert on corrupt file must return Err (read-before-write fails)"
+        );
+
+        // After removing the corrupt file the store is fully operational.
+        fs::remove_file(store.path.clone()).expect("remove corrupt file");
+        store.upsert(make_record("npm:fresh")).expect("upsert after removing corrupt file");
+        let list = store.list().expect("list after recovery");
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, BindingId::new("npm:fresh"));
+    }
+
+    /// `list()` with 1,000+ records must complete without panic and return
+    /// the correct count.
+    #[test]
+    fn json_store_large_record_count_lists_correctly() {
+        let dir = TempDir::new().expect("temp dir");
+        let store = file_store(&dir);
+        for i in 0..1000_usize {
+            store.upsert(make_record(&format!("npm:bulk-{i}"))).expect("upsert");
+        }
+        let list = store.list().expect("list");
+        assert_eq!(list.len(), 1000, "all 1000 records must be present");
+    }
+
+    #[test]
+    fn json_store_concurrent_upserts_with_different_ids_both_persist() {
+        use std::sync::Arc;
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("bindings.json");
+
+        let store1 = Arc::new(JsonFileBindingStore::at_path(path.clone()));
+        let store2 = Arc::new(JsonFileBindingStore::at_path(path));
+
+        let rec1 = make_record("npm:thread-1");
+        let rec2 = make_record("npm:thread-2");
+
+        let s1 = Arc::clone(&store1);
+        let r1 = rec1.clone();
+        let t1 = std::thread::spawn(move || s1.upsert(r1).expect("upsert t1"));
+
+        let s2 = Arc::clone(&store2);
+        let r2 = rec2.clone();
+        let t2 = std::thread::spawn(move || s2.upsert(r2).expect("upsert t2"));
+
+        t1.join().unwrap();
+        t2.join().unwrap();
+
+        let list = store1.list().expect("list");
+        assert_eq!(list.len(), 2, "both records must be present after concurrent upserts");
+    }
 }

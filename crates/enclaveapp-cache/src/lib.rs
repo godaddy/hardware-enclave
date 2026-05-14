@@ -771,6 +771,50 @@ mod tests {
         assert_eq!(issued_at, 1_699_996_400);
     }
 
+    /// Atomic rename-over semantics: an open file descriptor from before the
+    /// write still sees the old content; a fresh `read()` from the path sees
+    /// the new content. This verifies that `write()` uses atomic rename rather
+    /// than truncate-in-place, which would corrupt in-progress readers.
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_old_fd_sees_old_content_new_reader_sees_new_content() {
+        use std::io::Read;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("atomic.enc");
+        let fmt = test_format();
+
+        let entry1 = CacheEntry {
+            flags: 0x01,
+            header_data: vec![0xAA, 0xBB, 0xCC, 0xDD],
+            blobs: vec![vec![0x11, 0x22]],
+        };
+        fmt.write(&path, &entry1, 4).unwrap();
+
+        // Open an fd to the current file (old inode) before the overwrite.
+        let mut old_fd = fs::File::open(&path).unwrap();
+        let mut old_bytes = Vec::new();
+        old_fd.read_to_end(&mut old_bytes).unwrap();
+
+        let entry2 = CacheEntry {
+            flags: 0x02,
+            header_data: vec![0x55, 0x66, 0x77, 0x88],
+            blobs: vec![vec![0x33, 0x44, 0x55]],
+        };
+        fmt.write(&path, &entry2, 4).unwrap();
+
+        // New reader via path sees entry2.
+        let loaded_new = fmt.read(&path, 4).unwrap().unwrap();
+        assert_eq!(loaded_new, entry2, "new reader must see entry2 after write");
+
+        // Old bytes (read before rename) must decode as entry1.
+        let loaded_old = fmt.decode(&old_bytes, 4).unwrap();
+        assert_eq!(
+            loaded_old, entry1,
+            "fd opened before atomic overwrite must still see entry1"
+        );
+    }
+
     // ---- Simulated sso-jwt format ----
 
     #[test]

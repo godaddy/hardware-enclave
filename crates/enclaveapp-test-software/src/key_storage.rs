@@ -286,4 +286,109 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    #[test]
+    fn generate_duplicate_label_returns_error() {
+        let dir = test_dir();
+        let config = test_config(&dir);
+        generate_and_save(&config, "dup", KeyType::Signing, AccessPolicy::None).unwrap();
+        let result = generate_and_save(&config, "dup", KeyType::Signing, AccessPolicy::None);
+        assert!(
+            matches!(result, Err(Error::DuplicateLabel { .. })),
+            "expected DuplicateLabel, got: {result:?}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn generate_invalid_label_returns_error() {
+        let dir = test_dir();
+        let config = test_config(&dir);
+        let result = generate_and_save(&config, "", KeyType::Signing, AccessPolicy::None);
+        assert!(result.is_err(), "empty label must be rejected");
+        let result2 = generate_and_save(&config, "bad label!", KeyType::Signing, AccessPolicy::None);
+        assert!(result2.is_err(), "label with spaces/punctuation must be rejected");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_secret_key_returns_error_for_missing_key() {
+        let dir = test_dir();
+        let config = test_config(&dir);
+        let result = load_secret_key(&config, "ghost");
+        assert!(
+            matches!(result, Err(Error::KeyNotFound { .. })),
+            "expected KeyNotFound, got: {result:?}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn delete_key_returns_error_for_missing_key() {
+        let dir = test_dir();
+        let config = test_config(&dir);
+        let result = delete_key(&config, "ghost");
+        assert!(
+            matches!(result, Err(Error::KeyNotFound { .. })),
+            "expected KeyNotFound, got: {result:?}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_public_key_returns_65_byte_uncompressed_point() {
+        let dir = test_dir();
+        let config = test_config(&dir);
+        generate_and_save(&config, "pubtest", KeyType::Signing, AccessPolicy::None).unwrap();
+        let pub_key = load_public_key(&config, "pubtest").unwrap();
+        assert_eq!(pub_key.len(), 65);
+        assert_eq!(pub_key[0], 0x04);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn list_labels_empty_dir_returns_empty() {
+        let dir = test_dir();
+        let config = test_config(&dir);
+        let labels = list_labels(&config).unwrap();
+        assert!(labels.is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rename_key_same_name_is_noop() {
+        let dir = test_dir();
+        let config = test_config(&dir);
+        generate_and_save(&config, "mykey", KeyType::Signing, AccessPolicy::None).unwrap();
+        rename_key(&config, "mykey", "mykey").unwrap();
+        assert!(dir.join("mykey.key").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rename_key_missing_source_returns_error() {
+        let dir = test_dir();
+        let config = test_config(&dir);
+        let result = rename_key(&config, "ghost", "new-name");
+        assert!(
+            matches!(result, Err(Error::KeyNotFound { .. })),
+            "expected KeyNotFound, got: {result:?}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn software_config_with_keys_dir_override_returns_override() {
+        let dir = test_dir();
+        let config = SoftwareConfig::with_keys_dir("myapp", dir.clone());
+        assert_eq!(config.keys_dir(), dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn software_config_new_stores_app_name() {
+        let config = SoftwareConfig::new("my-test-app");
+        assert_eq!(config.app_name, "my-test-app");
+        assert!(config.keys_dir_override.is_none());
+    }
 }

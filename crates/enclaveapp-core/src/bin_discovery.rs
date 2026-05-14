@@ -319,4 +319,143 @@ mod tests {
             drop(find_trusted_binary("some-binary-name", "my-app"));
         }
     }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn candidate_dirs_no_home_no_exe_includes_fixed_unix_dirs() {
+        let ctx = BinaryDiscoveryContext {
+            current_exe: None,
+            home_dir: None,
+        };
+        let dirs = candidate_dirs(&ctx, "myapp");
+        assert!(dirs.contains(&PathBuf::from("/opt/homebrew/bin")));
+        assert!(dirs.contains(&PathBuf::from("/usr/local/bin")));
+        assert!(dirs.contains(&PathBuf::from("/usr/bin")));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn candidate_dirs_with_home_prepends_user_dirs() {
+        let ctx = BinaryDiscoveryContext {
+            current_exe: None,
+            home_dir: Some(PathBuf::from("/home/user")),
+        };
+        let dirs = candidate_dirs(&ctx, "myapp");
+        assert!(dirs.contains(&PathBuf::from("/home/user/.local/bin")));
+        assert!(dirs.contains(&PathBuf::from("/home/user/.cargo/bin")));
+        let local_bin_pos = dirs
+            .iter()
+            .position(|d| d == &PathBuf::from("/home/user/.local/bin"))
+            .unwrap();
+        let homebrew_pos = dirs
+            .iter()
+            .position(|d| d == &PathBuf::from("/opt/homebrew/bin"))
+            .unwrap();
+        assert!(local_bin_pos < homebrew_pos);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn candidate_dirs_exe_sibling_appended_as_fallback() {
+        let ctx = BinaryDiscoveryContext {
+            current_exe: Some(PathBuf::from("/opt/myapp/bin/myapp")),
+            home_dir: None,
+        };
+        let dirs = candidate_dirs(&ctx, "myapp");
+        assert!(dirs.contains(&PathBuf::from("/opt/myapp/bin")));
+        let usr_bin_pos = dirs
+            .iter()
+            .position(|d| d == &PathBuf::from("/usr/bin"))
+            .unwrap();
+        let sibling_pos = dirs
+            .iter()
+            .position(|d| d == &PathBuf::from("/opt/myapp/bin"))
+            .unwrap();
+        assert!(sibling_pos > usr_bin_pos);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn candidate_dirs_deduplicates_exe_sibling_matching_stable_dir() {
+        let ctx = BinaryDiscoveryContext {
+            current_exe: Some(PathBuf::from("/usr/local/bin/myapp")),
+            home_dir: None,
+        };
+        let dirs = candidate_dirs(&ctx, "myapp");
+        let count = dirs
+            .iter()
+            .filter(|d| *d == &PathBuf::from("/usr/local/bin"))
+            .count();
+        assert_eq!(count, 1);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn find_trusted_binary_with_context_returns_none_for_absent_binary() {
+        let root = test_dir("no-match");
+        let ctx = BinaryDiscoveryContext {
+            current_exe: None,
+            home_dir: Some(root.clone()),
+        };
+        let result =
+            find_trusted_binary_with_context("definitely-nonexistent-zz99", "myapp", &ctx);
+        assert!(result.is_none());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn binary_discovery_context_default_all_none() {
+        let ctx = BinaryDiscoveryContext::default();
+        assert!(ctx.current_exe.is_none());
+        assert!(ctx.home_dir.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_executable_file_is_not_discovered() {
+        let root = test_dir("non-exec");
+        let bin_dir = root.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let non_exec = bin_dir.join("myapp-helper");
+        // Write a regular file without execute permission
+        std::fs::write(&non_exec, b"#!/bin/sh\n").unwrap();
+        let mut perms = std::fs::metadata(&non_exec).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&non_exec, perms).unwrap();
+
+        let current_exe = bin_dir.join("myapp");
+        write_test_binary(&current_exe);
+
+        let ctx = BinaryDiscoveryContext {
+            current_exe: Some(current_exe),
+            home_dir: Some(root.join("home")),
+        };
+        let result = find_trusted_binary_with_context("myapp-helper", "myapp", &ctx);
+        assert!(result.is_none(), "non-executable should not be found");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn find_trusted_binary_with_context_prefers_stable_dir_over_exe_sibling() {
+        let root = test_dir("priority");
+        let stable = root.join(".local").join("bin");
+        let sibling_dir = root.join("sibling");
+        std::fs::create_dir_all(&stable).unwrap();
+        std::fs::create_dir_all(&sibling_dir).unwrap();
+
+        let stable_bin = stable.join("mytool");
+        let sibling_bin = sibling_dir.join("mytool");
+        write_test_binary(&stable_bin);
+        write_test_binary(&sibling_bin);
+
+        let ctx = BinaryDiscoveryContext {
+            current_exe: Some(sibling_dir.join("myapp")),
+            home_dir: Some(root.clone()),
+        };
+        let found = find_trusted_binary_with_context("mytool", "myapp", &ctx).unwrap();
+        assert_eq!(found, stable_bin);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

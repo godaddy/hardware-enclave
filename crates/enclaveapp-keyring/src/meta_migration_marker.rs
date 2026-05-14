@@ -120,7 +120,6 @@ pub fn clear(_app_name: &str) -> Result<()> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, let_underscore_drop)]
 mod tests {
-    #[cfg(all(feature = "keyring-storage", target_env = "gnu"))]
     use super::*;
     #[cfg(all(feature = "keyring-storage", target_env = "gnu"))]
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -141,6 +140,28 @@ mod tests {
     #[test]
     fn account_constant_format() {
         assert_eq!(MARKER_ACCOUNT, "__meta_migration_marker__");
+    }
+
+    #[cfg(not(all(feature = "keyring-storage", target_env = "gnu")))]
+    #[test]
+    fn is_set_returns_false_when_keyring_not_compiled_in() {
+        // On non-linux-gnu targets the stub returns Ok(false)
+        let result = is_set("test-app");
+        assert!(matches!(result, Ok(false)));
+    }
+
+    #[cfg(not(all(feature = "keyring-storage", target_env = "gnu")))]
+    #[test]
+    fn clear_returns_ok_when_keyring_not_compiled_in() {
+        let result = clear("test-app");
+        assert!(result.is_ok());
+    }
+
+    #[cfg(not(all(feature = "keyring-storage", target_env = "gnu")))]
+    #[test]
+    fn set_returns_err_when_keyring_not_compiled_in() {
+        let result = set("test-app");
+        assert!(result.is_err());
     }
 
     /// Real Secret Service round-trip. Persists state in the user's

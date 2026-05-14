@@ -281,6 +281,168 @@ pub fn read_line_bounded<R: BufRead>(
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod pure_tests {
+    use super::*;
+    use std::io::{self, Cursor};
+
+    #[test]
+    fn timeout_result_completed_into_option_is_some() {
+        let r: TimeoutResult<i32> = TimeoutResult::Completed(42);
+        assert_eq!(r.into_option(), Some(42));
+    }
+
+    #[test]
+    fn timeout_result_timed_out_into_option_is_none() {
+        let r: TimeoutResult<i32> = TimeoutResult::TimedOut;
+        assert_eq!(r.into_option(), None);
+    }
+
+    #[test]
+    fn timeout_result_completed_is_not_timed_out() {
+        let r: TimeoutResult<i32> = TimeoutResult::Completed(1);
+        assert!(!r.is_timed_out());
+    }
+
+    #[test]
+    fn timeout_result_timed_out_is_timed_out() {
+        let r: TimeoutResult<i32> = TimeoutResult::TimedOut;
+        assert!(r.is_timed_out());
+    }
+
+    #[test]
+    fn read_line_bounded_empty_reader_returns_none() {
+        let mut cursor = Cursor::new(b"");
+        let result = read_line_bounded(&mut cursor, 1024).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_line_bounded_single_line_with_newline() {
+        let mut cursor = Cursor::new(b"hello\n");
+        let result = read_line_bounded(&mut cursor, 1024).unwrap();
+        assert_eq!(result.as_deref(), Some("hello\n"));
+    }
+
+    #[test]
+    fn read_line_bounded_eof_without_newline() {
+        let mut cursor = Cursor::new(b"hello");
+        let result = read_line_bounded(&mut cursor, 1024).unwrap();
+        assert_eq!(result.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn read_line_bounded_multiple_lines_reads_sequentially() {
+        let mut cursor = Cursor::new(b"first\nsecond\n");
+        let line1 = read_line_bounded(&mut cursor, 1024).unwrap();
+        let line2 = read_line_bounded(&mut cursor, 1024).unwrap();
+        let line3 = read_line_bounded(&mut cursor, 1024).unwrap();
+        assert_eq!(line1.as_deref(), Some("first\n"));
+        assert_eq!(line2.as_deref(), Some("second\n"));
+        assert!(line3.is_none());
+    }
+
+    #[test]
+    fn read_line_bounded_line_exceeds_cap_returns_invalid_data() {
+        // 5 chars before the newline, cap is 3 → InvalidData
+        let mut cursor = Cursor::new(b"hello\n");
+        let err = read_line_bounded(&mut cursor, 3).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn read_line_bounded_line_at_exact_cap_succeeds() {
+        // exactly 5 chars before newline, cap is 5 → Ok
+        let mut cursor = Cursor::new(b"hello\n");
+        let result = read_line_bounded(&mut cursor, 5).unwrap();
+        assert_eq!(result.as_deref(), Some("hello\n"));
+    }
+
+    #[test]
+    fn read_line_bounded_max_bytes_zero_newline_first_succeeds() {
+        // cap=0, first byte is '\n' → consumed immediately → Ok("\n")
+        let mut cursor = Cursor::new(b"\nhello");
+        let result = read_line_bounded(&mut cursor, 0).unwrap();
+        assert_eq!(result.as_deref(), Some("\n"));
+    }
+
+    #[test]
+    fn read_line_bounded_max_bytes_zero_non_newline_first_is_error() {
+        let mut cursor = Cursor::new(b"a\nhello");
+        let err = read_line_bounded(&mut cursor, 0).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn read_line_bounded_utf8_content() {
+        let input = "héllo\n";
+        let mut cursor = Cursor::new(input.as_bytes());
+        let result = read_line_bounded(&mut cursor, 128).unwrap();
+        assert_eq!(result.as_deref(), Some("héllo\n"));
+    }
+
+    #[test]
+    fn read_line_bounded_exactly_max_bytes_at_eof_no_newline() {
+        let mut cursor = Cursor::new(b"abc");
+        let result = read_line_bounded(&mut cursor, 3).unwrap();
+        assert_eq!(result.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn read_line_bounded_large_cap_long_line() {
+        let line: Vec<u8> = std::iter::repeat(b'x').take(100).chain([b'\n']).collect();
+        let mut cursor = Cursor::new(line);
+        let result = read_line_bounded(&mut cursor, 200).unwrap();
+        let s = result.unwrap();
+        assert_eq!(s.len(), 101);
+        assert!(s.starts_with('x'));
+        assert!(s.ends_with('\n'));
+    }
+
+    #[test]
+    fn read_line_bounded_empty_line_newline_only() {
+        let mut cursor = Cursor::new(b"\n");
+        let result = read_line_bounded(&mut cursor, 1024).unwrap();
+        assert_eq!(result.as_deref(), Some("\n"));
+    }
+
+    #[test]
+    fn read_line_bounded_after_eof_returns_none() {
+        let mut cursor = Cursor::new(b"hi\n");
+        let _unused = read_line_bounded(&mut cursor, 1024).unwrap();
+        let eof = read_line_bounded(&mut cursor, 1024).unwrap();
+        assert!(eof.is_none());
+    }
+
+    #[test]
+    fn read_line_bounded_only_newlines() {
+        let mut cursor = Cursor::new(b"\n\n\n");
+        let r1 = read_line_bounded(&mut cursor, 10).unwrap();
+        let r2 = read_line_bounded(&mut cursor, 10).unwrap();
+        let r3 = read_line_bounded(&mut cursor, 10).unwrap();
+        let r4 = read_line_bounded(&mut cursor, 10).unwrap();
+        assert_eq!(r1.as_deref(), Some("\n"));
+        assert_eq!(r2.as_deref(), Some("\n"));
+        assert_eq!(r3.as_deref(), Some("\n"));
+        assert!(r4.is_none());
+    }
+
+    #[test]
+    fn read_line_bounded_single_char_at_eof() {
+        let mut cursor = Cursor::new(b"x");
+        let result = read_line_bounded(&mut cursor, 1).unwrap();
+        assert_eq!(result.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn read_line_bounded_error_message_contains_cap() {
+        let mut cursor = Cursor::new(b"toolongline\n");
+        let err = read_line_bounded(&mut cursor, 5).unwrap_err();
+        assert!(err.to_string().contains("5"));
+    }
+}
+
 #[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used, clippy::panic, let_underscore_drop)]
 mod tests {

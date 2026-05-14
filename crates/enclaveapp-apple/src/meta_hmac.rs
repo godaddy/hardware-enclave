@@ -348,6 +348,57 @@ mod tests {
         assert_eq!(service_name_for("awsenc"), "com.godaddy.awsenc.meta-hmac");
     }
 
+    #[test]
+    fn service_name_for_npmenc() {
+        assert_eq!(service_name_for("npmenc"), "com.godaddy.npmenc.meta-hmac");
+    }
+
+    #[test]
+    fn cache_miss_returns_none_for_unknown_app() {
+        let app = unique_app();
+        assert!(cache_lookup(&app).is_none());
+    }
+
+    #[test]
+    fn cache_insert_then_lookup_returns_correct_bytes() {
+        let app = unique_app();
+        let key = [0x42_u8; META_HMAC_KEY_LEN];
+        cache_insert(&app, key);
+        let result = cache_lookup(&app).expect("cache hit after insert");
+        assert_eq!(&result[..], &key[..]);
+        cache_evict(&app);
+    }
+
+    #[test]
+    fn cache_evict_removes_entry() {
+        let app = unique_app();
+        let key = [0x77_u8; META_HMAC_KEY_LEN];
+        cache_insert(&app, key);
+        assert!(cache_lookup(&app).is_some());
+        cache_evict(&app);
+        assert!(cache_lookup(&app).is_none());
+    }
+
+    #[test]
+    fn cache_insert_overwrites_existing_entry() {
+        let app = unique_app();
+        let key_a = [0x11_u8; META_HMAC_KEY_LEN];
+        let key_b = [0x22_u8; META_HMAC_KEY_LEN];
+        cache_insert(&app, key_a);
+        cache_insert(&app, key_b);
+        let result = cache_lookup(&app).expect("cache hit");
+        assert_eq!(&result[..], &key_b[..]);
+        cache_evict(&app);
+    }
+
+    #[test]
+    fn cache_evict_on_missing_app_is_noop() {
+        let app = unique_app();
+        // Evicting an app that was never inserted must not panic
+        cache_evict(&app);
+        assert!(cache_lookup(&app).is_none());
+    }
+
     /// Cross-process round-trip test: store, load, delete, load
     /// again. Hits the real Keychain on the test runner. Skipped if
     /// the Keychain is unreachable (CI runners without a login

@@ -463,4 +463,155 @@ mod tests {
     fn now_secs_returns_nonzero() {
         assert!(now_secs() > 1_000_000_000); // after 2001
     }
+
+    #[test]
+    fn classify_issued_in_future_is_fresh() {
+        // issued_at > now: saturating_sub gives age 0 → Fresh
+        let policy = TestPolicy::new(3600, 600, 300);
+        let now = 10_000;
+        let issued = now + 100; // clock skew: issued in the future
+        assert_eq!(
+            classify_credential(issued, issued, now, &policy, 1),
+            CredentialState::Fresh
+        );
+    }
+
+    #[test]
+    fn classify_exactly_one_before_refresh_window() {
+        let policy = TestPolicy::new(3600, 600, 300);
+        let now = 10_000;
+        let issued = now - 3599; // age 3599 < max_age 3600 → still Fresh
+        assert_eq!(
+            classify_credential(issued, issued, now, &policy, 1),
+            CredentialState::Fresh
+        );
+    }
+
+    #[test]
+    fn classify_exactly_at_refresh_window_end() {
+        let policy = TestPolicy::new(3600, 600, 300);
+        let now = 10_000;
+        // age == max_age + refresh → Grace
+        let issued = now - (3600 + 600);
+        assert_eq!(
+            classify_credential(issued, issued, now, &policy, 1),
+            CredentialState::Grace
+        );
+    }
+
+    #[test]
+    fn classify_one_before_refresh_window_end() {
+        let policy = TestPolicy::new(3600, 600, 300);
+        let now = 10_000;
+        // age == max_age + refresh - 1 → still RefreshWindow
+        let issued = now - (3600 + 600 - 1);
+        assert_eq!(
+            classify_credential(issued, issued, now, &policy, 1),
+            CredentialState::RefreshWindow
+        );
+    }
+
+    #[test]
+    fn classify_exactly_at_grace_end() {
+        let policy = TestPolicy::new(3600, 600, 300);
+        let now = 10_000;
+        // age == max_age + refresh + grace → Expired
+        let issued = now - (3600 + 600 + 300);
+        assert_eq!(
+            classify_credential(issued, issued, now, &policy, 1),
+            CredentialState::Expired
+        );
+    }
+
+    #[test]
+    fn classify_one_before_grace_end() {
+        let policy = TestPolicy::new(3600, 600, 300);
+        let now = 10_000;
+        // age == max_age + refresh + grace - 1 → still Grace
+        let issued = now - (3600 + 600 + 300 - 1);
+        assert_eq!(
+            classify_credential(issued, issued, now, &policy, 1),
+            CredentialState::Grace
+        );
+    }
+
+    #[test]
+    fn session_timeout_at_exact_boundary_is_expired() {
+        // now - session_start == session_max → Expired (>=)
+        let policy = TestPolicy::new(3600, 600, 300).with_session_timeout(1000);
+        let now = 10_000;
+        let session_start = now - 1000;
+        let issued = now - 10; // credential itself is fresh
+        assert_eq!(
+            classify_credential(issued, session_start, now, &policy, 1),
+            CredentialState::Expired
+        );
+    }
+
+    #[test]
+    fn session_timeout_one_before_boundary_is_not_expired() {
+        let policy = TestPolicy::new(3600, 600, 300).with_session_timeout(1000);
+        let now = 10_000;
+        let session_start = now - 999; // one second before timeout
+        let issued = now - 10;
+        assert_eq!(
+            classify_credential(issued, session_start, now, &policy, 1),
+            CredentialState::Fresh
+        );
+    }
+
+    #[test]
+    fn encode_cache_component_tilde_is_encoded() {
+        // Tilde is not in the safe charset, so it must be encoded
+        let encoded = encode_cache_component("a~b");
+        assert!(!encoded.contains('~') || encoded.contains("~7E") || encoded.starts_with("a~7E"));
+        // After encoding, it should decode to the original if we unescape ~XX
+        assert!(encoded.contains("7E") || !encoded.contains('~'));
+    }
+
+    #[test]
+    fn encode_cache_component_unicode_multi_byte() {
+        // A multi-byte UTF-8 character (é = U+00E9 = 0xC3 0xA9 in UTF-8)
+        let encoded = encode_cache_component("café");
+        // The ASCII part is unchanged, the non-ASCII is hex-encoded
+        assert!(encoded.starts_with("caf"));
+        assert!(!encoded.contains('é'));
+        assert!(encoded.contains('~')); // should be percent-style encoded with ~
+    }
+
+    #[test]
+    fn validate_https_url_empty_string_is_error() {
+        let err = validate_https_url("", "endpoint").unwrap_err();
+        assert!(err.contains("HTTPS") || err.contains("endpoint"));
+    }
+
+    #[test]
+    fn validate_https_url_no_scheme() {
+        let err = validate_https_url("example.com/api", "url").unwrap_err();
+        assert!(err.contains("HTTPS"));
+    }
+
+    #[test]
+    fn validate_https_url_ftp_scheme_is_error() {
+        let err = validate_https_url("ftp://example.com/auth", "ftp_url").unwrap_err();
+        assert!(err.contains("HTTPS"));
+        assert!(err.contains("ftp_url"));
+    }
+
+    #[test]
+    fn cache_file_path_empty_components_list() {
+        let dir = Path::new("/tmp/cache");
+        let path = cache_file_path(dir, &[], "bin");
+        // Empty join should produce ".bin"
+        assert_eq!(path, PathBuf::from("/tmp/cache/.bin"));
+    }
+
+    #[test]
+    fn system_time_secs_before_epoch_returns_zero() {
+        // SystemTime before UNIX_EPOCH should not panic and returns 0
+        let before_epoch = SystemTime::UNIX_EPOCH
+            .checked_sub(std::time::Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(system_time_secs(before_epoch), 0);
+    }
 }

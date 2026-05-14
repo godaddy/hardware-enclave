@@ -48,6 +48,196 @@ impl From<String> for BindingId {
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binding_id_new_stores_and_as_str_returns_same_string() {
+        let id = BindingId::new("npm:default");
+        assert_eq!(id.as_str(), "npm:default");
+    }
+
+    #[test]
+    fn binding_id_from_str_ref_produces_equal_value() {
+        let a = BindingId::new("x");
+        let b = BindingId::from("x");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn binding_id_from_string_produces_equal_value() {
+        let a = BindingId::new("x");
+        let b = BindingId::from("x".to_string());
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn binding_id_from_str_and_from_string_are_equal() {
+        let via_str: BindingId = "npm:test".into();
+        let via_string: BindingId = "npm:test".to_string().into();
+        assert_eq!(via_str, via_string);
+    }
+
+    #[test]
+    fn binding_id_empty_string() {
+        let id = BindingId::new("");
+        assert_eq!(id.as_str(), "");
+    }
+
+    #[test]
+    fn binding_id_clone_is_equal() {
+        let a = BindingId::new("npm:default");
+        let b = a.clone();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn binding_id_ord_lexicographic() {
+        let a = BindingId::new("a");
+        let b = BindingId::new("b");
+        assert!(a < b);
+        assert!(b > a);
+    }
+
+    #[test]
+    fn binding_id_serde_json_roundtrip() {
+        let id = BindingId::new("npm:production");
+        let json = serde_json::to_string(&id).unwrap();
+        let parsed: BindingId = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, id);
+    }
+
+    #[test]
+    fn binding_id_serde_json_serializes_as_plain_string() {
+        let id = BindingId::new("test-id");
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(json, "\"test-id\"");
+    }
+
+    #[test]
+    fn binding_id_debug_format_contains_value() {
+        let id = BindingId::new("debug-test");
+        let s = format!("{:?}", id);
+        assert!(s.contains("debug-test"));
+    }
+
+    #[test]
+    fn integration_type_serde_roundtrip_all_variants() {
+        for variant in [
+            IntegrationType::HelperTool,
+            IntegrationType::EnvInterpolation,
+            IntegrationType::TempMaterializedConfig,
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let parsed: IntegrationType = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, variant);
+        }
+    }
+
+    #[test]
+    fn binding_record_serde_roundtrip() {
+        let record = BindingRecord {
+            id: BindingId::new("npm:default"),
+            label: "label".into(),
+            target: "target-app".into(),
+            secret_env_var: "NPM_TOKEN".into(),
+            metadata: [("key".into(), "val".into())].into(),
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        let parsed: BindingRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, record);
+    }
+
+    #[test]
+    fn integration_type_all_variants_equal_to_themselves() {
+        assert_eq!(IntegrationType::HelperTool, IntegrationType::HelperTool);
+        assert_eq!(IntegrationType::EnvInterpolation, IntegrationType::EnvInterpolation);
+        assert_eq!(
+            IntegrationType::TempMaterializedConfig,
+            IntegrationType::TempMaterializedConfig
+        );
+    }
+
+    #[test]
+    fn integration_type_all_variants_not_equal_to_others() {
+        assert_ne!(IntegrationType::HelperTool, IntegrationType::EnvInterpolation);
+        assert_ne!(IntegrationType::HelperTool, IntegrationType::TempMaterializedConfig);
+        assert_ne!(
+            IntegrationType::EnvInterpolation,
+            IntegrationType::TempMaterializedConfig
+        );
+    }
+
+    #[test]
+    fn integration_type_debug_format_nonempty() {
+        for variant in [
+            IntegrationType::HelperTool,
+            IntegrationType::EnvInterpolation,
+            IntegrationType::TempMaterializedConfig,
+        ] {
+            assert!(!format!("{variant:?}").is_empty());
+        }
+    }
+
+    #[test]
+    fn resolution_strategy_all_variants_equal_to_themselves() {
+        assert_eq!(ResolutionStrategy::ExplicitPath, ResolutionStrategy::ExplicitPath);
+        assert_eq!(ResolutionStrategy::PathLookup, ResolutionStrategy::PathLookup);
+        assert_eq!(ResolutionStrategy::CommandV, ResolutionStrategy::CommandV);
+    }
+
+    #[test]
+    fn resolution_strategy_distinct_variants_not_equal() {
+        assert_ne!(ResolutionStrategy::ExplicitPath, ResolutionStrategy::PathLookup);
+        assert_ne!(ResolutionStrategy::ExplicitPath, ResolutionStrategy::CommandV);
+        assert_ne!(ResolutionStrategy::PathLookup, ResolutionStrategy::CommandV);
+    }
+
+    #[test]
+    fn resolved_program_struct_construction() {
+        let prog = ResolvedProgram {
+            path: PathBuf::from("/usr/bin/npm"),
+            fixed_args: vec!["--version".into()],
+            strategy: ResolutionStrategy::ExplicitPath,
+            shell_hint: Some("bash".into()),
+        };
+        assert_eq!(prog.path, PathBuf::from("/usr/bin/npm"));
+        assert_eq!(prog.fixed_args.len(), 1);
+        assert_eq!(prog.strategy, ResolutionStrategy::ExplicitPath);
+        assert_eq!(prog.shell_hint.as_deref(), Some("bash"));
+    }
+
+    #[test]
+    fn resolved_program_clone_is_equal() {
+        let prog = ResolvedProgram {
+            path: PathBuf::from("/bin/sh"),
+            fixed_args: vec![],
+            strategy: ResolutionStrategy::PathLookup,
+            shell_hint: None,
+        };
+        let cloned = prog.clone();
+        assert_eq!(prog.path, cloned.path);
+        assert_eq!(prog.strategy, cloned.strategy);
+        assert_eq!(prog.shell_hint, cloned.shell_hint);
+    }
+
+    #[test]
+    fn binding_record_empty_metadata_roundtrips() {
+        let record = BindingRecord {
+            id: BindingId::new("x"),
+            label: "l".into(),
+            target: "t".into(),
+            secret_env_var: "S".into(),
+            metadata: Default::default(),
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        let parsed: BindingRecord = serde_json::from_str(&json).unwrap();
+        assert!(parsed.metadata.is_empty());
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BindingRecord {
     pub id: BindingId,

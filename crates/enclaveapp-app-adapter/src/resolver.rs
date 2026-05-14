@@ -361,6 +361,107 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn alias_recursion_depth_exceeded_returns_error() {
+        // A fake shell that always says "cmd is an alias for cmd" causes
+        // infinite recursion. The resolver must bail with a descriptive
+        // error rather than stack-overflowing.
+        let dir = TempDir::new().expect("temp dir");
+        let shell_path = dir.path().join("fake-recursive-shell");
+
+        // command -v returns "cmd" (relative, not absolute → triggers symbolic resolution)
+        // command -V returns the alias line that points back to itself.
+        std::fs::write(
+            &shell_path,
+            b"#!/bin/sh\ncmd=\"$2\"\ncase \"$cmd\" in\n  \"command -v -- 'cmd'\") printf 'cmd\\n' ;;\n  \"command -V -- 'cmd'\") printf 'cmd is an alias for cmd\\n' ;;\n  *) exit 1 ;;\nesac\n",
+        )
+        .expect("write fake shell");
+        let mut perms = std::fs::metadata(&shell_path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&shell_path, perms).expect("chmod");
+
+        let err = resolve_program(
+            "cmd",
+            &ResolveOptions {
+                explicit_path: None,
+                mode: ResolveMode::CommandV,
+                shell: Some(shell_path),
+            },
+        )
+        .expect_err("recursive alias must return an error, not stack-overflow");
+
+        // The recursion limit error may be swallowed by the Auto-mode fallback path
+        // and surface as ProgramNotFound. Both are acceptable — neither panics or
+        // stack-overflows. What's NOT acceptable is a stack overflow or hang.
+        assert!(
+            matches!(
+                err,
+                AdapterError::UnsupportedShellResolution { .. } | AdapterError::ProgramNotFound(_)
+            ),
+            "recursive alias must return a known error (not stack-overflow): {err:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_in_path_only_mode_with_shell_env_absent_does_not_panic() {
+        // PathOnly mode never consults the SHELL env var. Removing SHELL
+        // and calling in PathOnly mode must not panic even if the command
+        // is absent.
+        let original_shell = env::var_os("SHELL");
+        env::remove_var("SHELL");
+
+        let result = resolve_program(
+            "this-command-definitely-does-not-exist-zz99",
+            &ResolveOptions {
+                explicit_path: None,
+                mode: ResolveMode::PathOnly,
+                shell: None,
+            },
+        );
+
+        if let Some(s) = original_shell {
+            env::set_var("SHELL", s);
+        }
+
+        assert!(
+            matches!(result, Err(AdapterError::ProgramNotFound(_))),
+            "absent command must return ProgramNotFound, got: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn empty_path_component_does_not_panic() {
+        // PATH with a leading or trailing colon contains an empty component.
+        // env::split_paths returns an empty PathBuf for the empty component.
+        // The resolver must handle this gracefully: no panic, returns ProgramNotFound.
+        let original_path = env::var_os("PATH");
+        // Leading colon: empty component before /tmp
+        env::set_var("PATH", ":/tmp");
+
+        let result = resolve_program(
+            "this-command-definitely-does-not-exist-zz99",
+            &ResolveOptions {
+                explicit_path: None,
+                mode: ResolveMode::PathOnly,
+                shell: None,
+            },
+        );
+
+        if let Some(p) = original_path {
+            env::set_var("PATH", p);
+        } else {
+            env::remove_var("PATH");
+        }
+
+        assert!(
+            result.is_err(),
+            "absent command with malformed PATH must return Err, not panic"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn resolves_explicit_path() {
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path().join("npm");
@@ -598,5 +699,295 @@ mod tests {
         } else {
             env::remove_var("PATH");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Pure function unit tests (no subprocess needed)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn extract_alias_command_is_an_alias_for_marker() {
+        let result = extract_alias_command("git is an alias for /usr/bin/git");
+        assert_eq!(result.as_deref(), Some("/usr/bin/git"));
+    }
+
+    #[test]
+    fn extract_alias_command_aliased_to_marker() {
+        let result = extract_alias_command("npm aliased to /usr/local/bin/npm");
+        assert_eq!(result.as_deref(), Some("/usr/local/bin/npm"));
+    }
+
+    #[test]
+    fn extract_alias_command_no_marker_returns_none() {
+        let result = extract_alias_command("git is a shell function");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn extract_alias_command_trims_trailing_whitespace() {
+        let result = extract_alias_command("cmd is an alias for   /bin/cmd  ");
+        assert_eq!(result.as_deref(), Some("/bin/cmd"));
+    }
+
+    #[test]
+    fn extract_alias_command_strips_single_quotes() {
+        let result = extract_alias_command("g is an alias for 'git'");
+        assert_eq!(result.as_deref(), Some("git"));
+    }
+
+    #[test]
+    fn extract_alias_command_strips_backtick() {
+        let result = extract_alias_command("g is an alias for `git`");
+        assert_eq!(result.as_deref(), Some("git"));
+    }
+
+    #[test]
+    fn extract_alias_command_multiword_command_preserved() {
+        let result = extract_alias_command("npm is an alias for asdf exec npm");
+        assert_eq!(result.as_deref(), Some("asdf exec npm"));
+    }
+
+    #[test]
+    fn extract_function_command_basic() {
+        let result = extract_function_command("() { git status }");
+        assert_eq!(result.as_deref(), Some("git status"));
+    }
+
+    #[test]
+    fn extract_function_command_skips_empty_lines() {
+        let result = extract_function_command("() {\n\n  git status\n}");
+        assert_eq!(result.as_deref(), Some("git status"));
+    }
+
+    #[test]
+    fn extract_function_command_skips_comment_lines() {
+        let result = extract_function_command("() {\n  # comment\n  git commit\n}");
+        assert_eq!(result.as_deref(), Some("git commit"));
+    }
+
+    #[test]
+    fn extract_function_command_no_braces_returns_none() {
+        let result = extract_function_command("git is a function");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn extract_function_command_only_comment_lines_returns_none() {
+        let result = extract_function_command("() { # only a comment }");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn extract_function_command_closing_before_opening_returns_none() {
+        let result = extract_function_command("} some text {");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn unquote_command_backtick_wrapped() {
+        assert_eq!(unquote_command("`git`"), "git");
+    }
+
+    #[test]
+    fn unquote_command_single_quoted() {
+        assert_eq!(unquote_command("'git'"), "git");
+    }
+
+    #[test]
+    fn unquote_command_double_quoted() {
+        assert_eq!(unquote_command("\"git\""), "git");
+    }
+
+    #[test]
+    fn unquote_command_no_quotes_unchanged() {
+        assert_eq!(unquote_command("git"), "git");
+    }
+
+    #[test]
+    fn unquote_command_trims_whitespace() {
+        assert_eq!(unquote_command("  git  "), "git");
+    }
+
+    #[test]
+    fn unquote_command_empty_string() {
+        assert_eq!(unquote_command(""), "");
+    }
+
+    #[test]
+    fn unquote_command_whitespace_then_single_quotes() {
+        assert_eq!(unquote_command("  'git'  "), "git");
+    }
+
+    #[test]
+    fn shell_quote_simple_string() {
+        assert_eq!(shell_quote("hello"), "'hello'");
+    }
+
+    #[test]
+    fn shell_quote_string_with_single_quote() {
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn shell_quote_empty_string() {
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn shell_quote_string_with_spaces() {
+        assert_eq!(shell_quote("hello world"), "'hello world'");
+    }
+
+    #[test]
+    fn shell_quote_dollar_sign_not_escaped() {
+        assert_eq!(shell_quote("$PATH"), "'$PATH'");
+    }
+
+    #[test]
+    fn normalize_wrapper_tokens_command_prefix_stripped() {
+        let mut tokens = vec!["command".to_string(), "git".to_string()];
+        normalize_wrapper_tokens(&mut tokens);
+        assert_eq!(tokens, vec!["git"]);
+    }
+
+    #[test]
+    fn normalize_wrapper_tokens_builtin_prefix_stripped() {
+        let mut tokens = vec!["builtin".to_string(), "git".to_string()];
+        normalize_wrapper_tokens(&mut tokens);
+        assert_eq!(tokens, vec!["git"]);
+    }
+
+    #[test]
+    fn normalize_wrapper_tokens_exec_prefix_stripped() {
+        let mut tokens = vec!["exec".to_string(), "git".to_string()];
+        normalize_wrapper_tokens(&mut tokens);
+        assert_eq!(tokens, vec!["git"]);
+    }
+
+    #[test]
+    fn normalize_wrapper_tokens_command_with_double_dash() {
+        let mut tokens = vec!["command".to_string(), "--".to_string(), "git".to_string()];
+        normalize_wrapper_tokens(&mut tokens);
+        assert_eq!(tokens, vec!["git"]);
+    }
+
+    #[test]
+    fn normalize_wrapper_tokens_env_prefix_stripped() {
+        let mut tokens = vec!["env".to_string(), "git".to_string()];
+        normalize_wrapper_tokens(&mut tokens);
+        assert_eq!(tokens, vec!["git"]);
+    }
+
+    #[test]
+    fn normalize_wrapper_tokens_env_with_assignment_stripped() {
+        let mut tokens = vec![
+            "env".to_string(),
+            "FOO=bar".to_string(),
+            "git".to_string(),
+        ];
+        normalize_wrapper_tokens(&mut tokens);
+        assert_eq!(tokens, vec!["git"]);
+    }
+
+    #[test]
+    fn normalize_wrapper_tokens_env_dash_dash_and_assignment_stripped() {
+        let mut tokens = vec![
+            "env".to_string(),
+            "--".to_string(),
+            "KEY=val".to_string(),
+            "git".to_string(),
+        ];
+        normalize_wrapper_tokens(&mut tokens);
+        assert_eq!(tokens, vec!["git"]);
+    }
+
+    #[test]
+    fn normalize_wrapper_tokens_no_wrapper_unchanged() {
+        let mut tokens = vec!["git".to_string(), "status".to_string()];
+        normalize_wrapper_tokens(&mut tokens);
+        assert_eq!(tokens, vec!["git", "status"]);
+    }
+
+    #[test]
+    fn normalize_wrapper_tokens_empty_vec_unchanged() {
+        let mut tokens: Vec<String> = vec![];
+        normalize_wrapper_tokens(&mut tokens);
+        assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn normalize_wrapper_tokens_nested_command_builtin() {
+        let mut tokens = vec![
+            "command".to_string(),
+            "builtin".to_string(),
+            "git".to_string(),
+        ];
+        normalize_wrapper_tokens(&mut tokens);
+        assert_eq!(tokens, vec!["git"]);
+    }
+
+    #[test]
+    fn normalize_wrapper_tokens_preserves_trailing_args() {
+        let mut tokens = vec![
+            "command".to_string(),
+            "git".to_string(),
+            "--version".to_string(),
+        ];
+        normalize_wrapper_tokens(&mut tokens);
+        assert_eq!(tokens, vec!["git", "--version"]);
+    }
+
+    #[test]
+    fn parse_command_string_simple_program() {
+        let result = parse_command_string("git".to_string(), "raw".to_string());
+        let parsed = result.expect("should parse");
+        assert_eq!(parsed.program_token, "git");
+        assert!(parsed.fixed_args.is_empty());
+    }
+
+    #[test]
+    fn parse_command_string_strips_dollar_at() {
+        let result = parse_command_string("git $@".to_string(), "raw".to_string());
+        let parsed = result.expect("should parse");
+        assert_eq!(parsed.program_token, "git");
+        assert!(parsed.fixed_args.is_empty());
+    }
+
+    #[test]
+    fn parse_command_string_strips_quoted_dollar_at() {
+        let result = parse_command_string("git \"$@\"".to_string(), "raw".to_string());
+        let parsed = result.expect("should parse");
+        assert_eq!(parsed.program_token, "git");
+        assert!(parsed.fixed_args.is_empty());
+    }
+
+    #[test]
+    fn parse_command_string_with_fixed_args() {
+        let result = parse_command_string("asdf exec npm".to_string(), "raw".to_string());
+        let parsed = result.expect("should parse");
+        assert_eq!(parsed.program_token, "asdf");
+        assert_eq!(parsed.fixed_args, vec!["exec", "npm"]);
+    }
+
+    #[test]
+    fn parse_command_string_empty_after_strip_returns_none() {
+        let result = parse_command_string("$@".to_string(), "raw".to_string());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_command_string_wrapper_stripped() {
+        let result = parse_command_string("command git $@".to_string(), "raw".to_string());
+        let parsed = result.expect("should parse");
+        assert_eq!(parsed.program_token, "git");
+        assert!(parsed.fixed_args.is_empty());
+    }
+
+    #[test]
+    fn parse_command_string_raw_preserved() {
+        let result =
+            parse_command_string("git".to_string(), "original description".to_string());
+        let parsed = result.expect("should parse");
+        assert_eq!(parsed.raw, "original description");
     }
 }

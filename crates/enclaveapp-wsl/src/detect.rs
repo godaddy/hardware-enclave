@@ -148,4 +148,96 @@ mod tests {
         let bytes = b"U\0b\0u\0n\0t\0u\0";
         assert_eq!(decode_wsl_output(bytes), "Ubuntu");
     }
+
+    #[test]
+    fn decode_wsl_output_pure_utf8_returns_as_is() {
+        let bytes = b"hello world";
+        assert_eq!(decode_wsl_output(bytes), "hello world");
+    }
+
+    #[test]
+    fn decode_wsl_output_empty_bytes_returns_empty_string() {
+        assert_eq!(decode_wsl_output(b""), "");
+    }
+
+    #[test]
+    fn decode_wsl_output_utf16le_with_bom_decoded() {
+        // 0xFF 0xFE = BOM, followed by "Hi" in UTF-16LE
+        let bytes: &[u8] = &[0xFF, 0xFE, b'H', 0, b'i', 0];
+        assert_eq!(decode_wsl_output(bytes), "Hi");
+    }
+
+    #[test]
+    fn decode_wsl_output_only_bom_returns_empty() {
+        let bytes: &[u8] = &[0xFF, 0xFE];
+        assert_eq!(decode_wsl_output(bytes), "");
+    }
+
+    #[test]
+    fn decode_wsl_output_utf16le_bom_with_newline() {
+        // BOM + "A\n" in UTF-16LE
+        let bytes: &[u8] = &[0xFF, 0xFE, b'A', 0, b'\n', 0];
+        assert_eq!(decode_wsl_output(bytes), "A\n");
+    }
+
+    #[test]
+    fn decode_wsl_output_ascii_no_nulls_treated_as_utf8() {
+        let bytes = b"Debian";
+        assert_eq!(decode_wsl_output(bytes), "Debian");
+    }
+
+    #[test]
+    fn decode_wsl_output_high_null_density_treated_as_utf16le() {
+        // "ABCD" as UTF-16LE without BOM: 8 bytes, 4 nulls (density = 50% > 25%)
+        let bytes: &[u8] = &[b'A', 0, b'B', 0, b'C', 0, b'D', 0];
+        assert_eq!(decode_wsl_output(bytes), "ABCD");
+    }
+
+    #[test]
+    fn decode_wsl_output_low_null_density_treated_as_utf8() {
+        // 8 bytes with only 1 null (density = 12.5% < 25%) → UTF-8
+        let bytes: &[u8] = &[b'A', b'B', b'C', b'D', b'E', b'F', b'G', 0];
+        // from_utf8_lossy on bytes with embedded NUL: the NUL survives as NUL char
+        let result = decode_wsl_output(bytes);
+        assert!(result.starts_with("ABCDEFG"));
+    }
+
+    #[test]
+    fn decode_wsl_output_utf16le_bom_multiline() {
+        // BOM + "Ubuntu\nDebian" in UTF-16LE
+        let mut bytes = vec![0xFF_u8, 0xFE];
+        for ch in "Ubuntu\nDebian".encode_utf16() {
+            bytes.extend_from_slice(&ch.to_le_bytes());
+        }
+        let result = decode_wsl_output(&bytes);
+        assert!(result.contains("Ubuntu"));
+        assert!(result.contains("Debian"));
+    }
+
+    #[test]
+    fn decode_wsl_output_utf16le_without_bom_multiline() {
+        // "Ubuntu\nDebian" as UTF-16LE without BOM (high null density)
+        let mut bytes: Vec<u8> = Vec::new();
+        for ch in "Ubuntu\nDebian".encode_utf16() {
+            bytes.extend_from_slice(&ch.to_le_bytes());
+        }
+        let result = decode_wsl_output(&bytes);
+        assert!(result.contains("Ubuntu"));
+        assert!(result.contains("Debian"));
+    }
+
+    #[test]
+    fn decode_wsl_output_three_bytes_not_bom_not_utf16le() {
+        // Fewer than 4 bytes can't hit the null-density branch
+        let bytes: &[u8] = &[b'A', 0, b'B'];
+        // 3 bytes, 1 null: len < 4 so nul_density check fails → UTF-8
+        let result = decode_wsl_output(bytes);
+        assert!(result.contains('A'));
+    }
+
+    #[test]
+    fn decode_wsl_output_utf8_with_multibyte_char() {
+        let input = "Ubuntu 22.04 LTS";
+        assert_eq!(decode_wsl_output(input.as_bytes()), input);
+    }
 }

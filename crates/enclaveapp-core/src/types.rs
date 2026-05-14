@@ -270,4 +270,103 @@ mod tests {
         let parsed: KeyType = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, KeyType::Encryption);
     }
+
+    #[test]
+    fn presence_mode_default_is_cached() {
+        assert_eq!(PresenceMode::default(), PresenceMode::Cached);
+    }
+
+    #[test]
+    fn presence_mode_migration_default_none_policy_gives_none() {
+        assert_eq!(
+            PresenceMode::migration_default(AccessPolicy::None),
+            PresenceMode::None
+        );
+    }
+
+    #[test]
+    fn presence_mode_migration_default_any_policy_gives_strict() {
+        assert_eq!(
+            PresenceMode::migration_default(AccessPolicy::Any),
+            PresenceMode::Strict
+        );
+    }
+
+    #[test]
+    fn presence_mode_migration_default_biometric_gives_strict() {
+        assert_eq!(
+            PresenceMode::migration_default(AccessPolicy::BiometricOnly),
+            PresenceMode::Strict
+        );
+    }
+
+    #[test]
+    fn presence_mode_migration_default_password_gives_strict() {
+        assert_eq!(
+            PresenceMode::migration_default(AccessPolicy::PasswordOnly),
+            PresenceMode::Strict
+        );
+    }
+
+    #[test]
+    fn presence_mode_serde_roundtrip_all_variants() {
+        let variants = [PresenceMode::Cached, PresenceMode::Strict, PresenceMode::None];
+        for mode in &variants {
+            let json = serde_json::to_string(mode).unwrap();
+            let parsed: PresenceMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(*mode, parsed);
+        }
+    }
+
+    #[test]
+    fn presence_mode_serde_wire_strings() {
+        assert_eq!(serde_json::to_string(&PresenceMode::Cached).unwrap(), "\"cached\"");
+        assert_eq!(serde_json::to_string(&PresenceMode::Strict).unwrap(), "\"strict\"");
+        assert_eq!(serde_json::to_string(&PresenceMode::None).unwrap(), "\"none\"");
+    }
+
+    #[test]
+    fn validate_p256_point_empty_input_is_error() {
+        assert!(validate_p256_point(&[]).is_err());
+    }
+
+    #[test]
+    fn validate_p256_point_exact_length_wrong_prefix() {
+        let mut point = vec![0x00];
+        point.extend_from_slice(&[0xBB; 64]);
+        assert!(validate_p256_point(&point).is_err());
+    }
+
+    #[test]
+    fn validate_label_exactly_64_chars_is_valid() {
+        let label = "a".repeat(64);
+        assert!(validate_label(&label).is_ok());
+    }
+
+    #[test]
+    fn validate_label_65_chars_is_rejected() {
+        let label = "a".repeat(65);
+        let err = validate_label(&label).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("64") || msg.to_lowercase().contains("exceed"));
+    }
+
+    #[test]
+    fn validate_label_hyphens_and_underscores_allowed() {
+        assert!(validate_label("my-key_v2").is_ok());
+        assert!(validate_label("---").is_ok());
+        assert!(validate_label("___").is_ok());
+    }
+
+    #[test]
+    fn access_policy_ffi_roundtrip_all_variants() {
+        for policy in [
+            AccessPolicy::None,
+            AccessPolicy::Any,
+            AccessPolicy::BiometricOnly,
+            AccessPolicy::PasswordOnly,
+        ] {
+            assert_eq!(AccessPolicy::from_ffi_value(policy.as_ffi_value()), policy);
+        }
+    }
 }

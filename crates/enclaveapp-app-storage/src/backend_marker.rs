@@ -154,4 +154,61 @@ mod tests {
         assert_eq!(read(&app).unwrap(), Some(BackendKind::Keyring));
         cleanup(&app);
     }
+
+    // Pure function unit tests for parse_kind and kind_str
+
+    #[test]
+    fn parse_kind_se_returns_secure_enclave() {
+        assert_eq!(parse_kind("se"), Some(BackendKind::SecureEnclave));
+    }
+
+    #[test]
+    fn parse_kind_tpm_returns_tpm() {
+        assert_eq!(parse_kind("tpm"), Some(BackendKind::Tpm));
+    }
+
+    #[test]
+    fn parse_kind_tpm_bridge_returns_tpm_bridge() {
+        assert_eq!(parse_kind("tpm-bridge"), Some(BackendKind::TpmBridge));
+    }
+
+    #[test]
+    fn parse_kind_keyring_returns_keyring() {
+        assert_eq!(parse_kind("keyring"), Some(BackendKind::Keyring));
+    }
+
+    #[test]
+    fn parse_kind_unknown_returns_none() {
+        assert_eq!(parse_kind("unknown"), None);
+        assert_eq!(parse_kind(""), None);
+        assert_eq!(parse_kind("SE"), None);
+        assert_eq!(parse_kind("TPM"), None);
+    }
+
+    #[test]
+    fn kind_str_roundtrips_through_parse_kind() {
+        for kind in [
+            BackendKind::SecureEnclave,
+            BackendKind::Tpm,
+            BackendKind::TpmBridge,
+            BackendKind::Keyring,
+        ] {
+            let s = kind_str(kind);
+            assert_eq!(parse_kind(s), Some(kind));
+        }
+    }
+
+    #[test]
+    fn kind_str_values_are_lowercase_ascii() {
+        for kind in [
+            BackendKind::SecureEnclave,
+            BackendKind::Tpm,
+            BackendKind::TpmBridge,
+            BackendKind::Keyring,
+        ] {
+            let s = kind_str(kind);
+            assert!(s.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+                "kind_str({kind:?}) = '{s}' contains unexpected characters");
+        }
+    }
 }

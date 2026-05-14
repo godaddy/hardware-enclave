@@ -799,4 +799,55 @@ mod tests {
         // key-in-2 should not exist in backend1
         assert!(backend1.public_key("key-in-2").is_err());
     }
+
+    #[test]
+    fn key_exists_returns_true_for_generated_key() {
+        let backend = MockKeyBackend::new();
+        backend
+            .generate("exists-key", KeyType::Signing, AccessPolicy::None)
+            .unwrap();
+        assert!(backend.key_exists("exists-key").unwrap());
+    }
+
+    #[test]
+    fn key_exists_returns_false_for_missing_key() {
+        let backend = MockKeyBackend::new();
+        assert!(!backend.key_exists("ghost-key").unwrap());
+    }
+
+    #[test]
+    fn key_exists_returns_false_after_delete() {
+        let backend = MockKeyBackend::new();
+        backend
+            .generate("del-key", KeyType::Signing, AccessPolicy::None)
+            .unwrap();
+        backend.delete_key("del-key").unwrap();
+        assert!(!backend.key_exists("del-key").unwrap());
+    }
+
+    #[test]
+    fn rename_key_default_impl_returns_error() {
+        let backend = MockKeyBackend::new();
+        backend
+            .generate("source", KeyType::Signing, AccessPolicy::None)
+            .unwrap();
+        let result = backend.rename_key("source", "target");
+        assert!(result.is_err(), "default rename_key must return an error");
+    }
+
+    #[test]
+    fn sign_with_presence_falls_back_to_sign() {
+        use enclaveapp_core::PresenceMode;
+        let backend = MockKeyBackend::new();
+        backend
+            .generate("signing-key", KeyType::Signing, AccessPolicy::None)
+            .unwrap();
+        let data = b"test data";
+        let sig_regular = backend.sign("signing-key", data).unwrap();
+        let sig_presence = backend
+            .sign_with_presence("signing-key", data, PresenceMode::Cached, 30, "reason")
+            .unwrap();
+        assert_eq!(sig_regular, sig_presence, "sign_with_presence must delegate to sign");
+    }
+
 }

@@ -41,4 +41,93 @@ mod tests {
             IntegrationType::EnvInterpolation
         );
     }
+
+    #[test]
+    fn empty_supported_list_returns_error() {
+        let result = choose_integration(&[]);
+        assert!(
+            matches!(result, Err(AdapterError::NoSupportedIntegration)),
+            "empty list must produce NoSupportedIntegration"
+        );
+    }
+
+    #[test]
+    fn only_temp_materialized_config_is_selected() {
+        let result = choose_integration(&[IntegrationType::TempMaterializedConfig]);
+        assert_eq!(result.unwrap(), IntegrationType::TempMaterializedConfig);
+    }
+
+    #[test]
+    fn helper_tool_wins_over_env_interpolation() {
+        let supported = [
+            IntegrationType::EnvInterpolation,
+            IntegrationType::HelperTool,
+        ];
+        assert_eq!(
+            choose_integration(&supported).unwrap(),
+            IntegrationType::HelperTool,
+            "HelperTool must beat EnvInterpolation"
+        );
+    }
+
+    #[test]
+    fn helper_tool_wins_over_temp_materialized_config() {
+        let supported = [
+            IntegrationType::TempMaterializedConfig,
+            IntegrationType::HelperTool,
+        ];
+        assert_eq!(
+            choose_integration(&supported).unwrap(),
+            IntegrationType::HelperTool
+        );
+    }
+
+    #[test]
+    fn env_interpolation_wins_over_temp_materialized_config() {
+        let supported = [
+            IntegrationType::TempMaterializedConfig,
+            IntegrationType::EnvInterpolation,
+        ];
+        assert_eq!(
+            choose_integration(&supported).unwrap(),
+            IntegrationType::EnvInterpolation
+        );
+    }
+
+    #[test]
+    fn only_env_interpolation_is_selected() {
+        let result = choose_integration(&[IntegrationType::EnvInterpolation]);
+        assert_eq!(result.unwrap(), IntegrationType::EnvInterpolation);
+    }
+
+    #[test]
+    fn only_helper_tool_is_selected() {
+        let result = choose_integration(&[IntegrationType::HelperTool]);
+        assert_eq!(result.unwrap(), IntegrationType::HelperTool);
+    }
+
+    #[test]
+    fn all_three_prefers_helper_tool() {
+        let supported = [
+            IntegrationType::TempMaterializedConfig,
+            IntegrationType::EnvInterpolation,
+            IntegrationType::HelperTool,
+        ];
+        assert_eq!(
+            choose_integration(&supported).unwrap(),
+            IntegrationType::HelperTool
+        );
+    }
+
+    #[test]
+    fn duplicate_entries_still_selects_correct_priority() {
+        let supported = [
+            IntegrationType::EnvInterpolation,
+            IntegrationType::EnvInterpolation,
+        ];
+        assert_eq!(
+            choose_integration(&supported).unwrap(),
+            IntegrationType::EnvInterpolation
+        );
+    }
 }

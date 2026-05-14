@@ -709,4 +709,121 @@ mod tests {
         let script = generate_shell_init("pwsh", &awsenc_config()).unwrap();
         assert!(script.contains("PowerShell"));
     }
+
+    // Pure helper unit tests
+
+    #[test]
+    fn pattern_alternation_empty_produces_empty_string() {
+        assert_eq!(pattern_alternation(&[]), "");
+    }
+
+    #[test]
+    fn pattern_alternation_single_pattern() {
+        let pats = vec!["AWS_ACCESS_KEY_ID".to_string()];
+        assert_eq!(pattern_alternation(&pats), "AWS_ACCESS_KEY_ID");
+    }
+
+    #[test]
+    fn pattern_alternation_multiple_patterns_joined_by_pipe() {
+        let pats = vec![
+            "AWS_ACCESS_KEY_ID".to_string(),
+            "AWS_SECRET_ACCESS_KEY".to_string(),
+            "AWS_SESSION_TOKEN".to_string(),
+        ];
+        assert_eq!(
+            pattern_alternation(&pats),
+            "AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN"
+        );
+    }
+
+    #[test]
+    fn fish_pattern_match_empty_produces_empty_string() {
+        assert_eq!(fish_pattern_match(&[]), "");
+    }
+
+    #[test]
+    fn fish_pattern_match_multiple_patterns_joined_by_pipe() {
+        let pats = vec!["SSO_JWT".to_string(), "COMPANY_JWT".to_string()];
+        assert_eq!(fish_pattern_match(&pats), "SSO_JWT|COMPANY_JWT");
+    }
+
+    #[test]
+    fn bash_warning_lines_empty_list_is_empty_string() {
+        assert_eq!(bash_warning_lines(&[]), "");
+    }
+
+    #[test]
+    fn bash_warning_lines_single_line_uses_4_space_indent() {
+        let warning = vec!["danger!".to_string()];
+        let result = bash_warning_lines(&warning);
+        assert_eq!(result, "    echo \"danger!\" >&2");
+    }
+
+    #[test]
+    fn bash_warning_lines_multiple_lines_joined_by_newline() {
+        let warning = vec!["line one".to_string(), "line two".to_string()];
+        let result = bash_warning_lines(&warning);
+        assert!(result.contains("line one"));
+        assert!(result.contains("line two"));
+        assert!(result.contains('\n'));
+        let parts: Vec<&str> = result.split('\n').collect();
+        assert_eq!(parts.len(), 2);
+    }
+
+    #[test]
+    fn bash_warning_lines_escapes_double_quotes() {
+        let warning = vec!["say \"hello\"".to_string()];
+        let result = bash_warning_lines(&warning);
+        assert!(result.contains("\\\"hello\\\""), "double quotes must be escaped: {result}");
+    }
+
+    #[test]
+    fn fish_warning_lines_empty_list_is_empty_string() {
+        assert_eq!(fish_warning_lines(&[]), "");
+    }
+
+    #[test]
+    fn fish_warning_lines_single_line_uses_8_space_indent() {
+        let warning = vec!["oops".to_string()];
+        let result = fish_warning_lines(&warning);
+        assert!(result.starts_with("        echo \"oops\""));
+    }
+
+    #[test]
+    fn fish_warning_lines_escapes_double_quotes() {
+        let warning = vec!["say \"hello\"".to_string()];
+        let result = fish_warning_lines(&warning);
+        assert!(result.contains("\\\"hello\\\""), "double quotes must be escaped: {result}");
+    }
+
+    #[test]
+    fn powershell_warning_lines_empty_list_is_empty_string() {
+        assert_eq!(powershell_warning_lines(&[]), "");
+    }
+
+    #[test]
+    fn powershell_warning_lines_single_line_contains_write_host() {
+        let warning = vec!["danger".to_string()];
+        let result = powershell_warning_lines(&warning);
+        assert!(result.contains("Write-Host"));
+        assert!(result.contains("ForegroundColor Yellow"));
+        assert!(result.contains("danger"));
+    }
+
+    #[test]
+    fn powershell_warning_lines_escapes_double_quotes_with_backtick() {
+        let warning = vec!["say \"hello\"".to_string()];
+        let result = powershell_warning_lines(&warning);
+        assert!(result.contains("`\"hello`\""), "double quotes must use backtick escape: {result}");
+    }
+
+    #[test]
+    fn powershell_warning_lines_multiple_lines_joined_by_newline() {
+        let warning = vec!["line one".to_string(), "line two".to_string()];
+        let result = powershell_warning_lines(&warning);
+        let parts: Vec<&str> = result.split('\n').collect();
+        assert_eq!(parts.len(), 2);
+        assert!(parts[0].contains("line one"));
+        assert!(parts[1].contains("line two"));
+    }
 }

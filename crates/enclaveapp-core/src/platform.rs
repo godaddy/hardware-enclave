@@ -77,4 +77,24 @@ mod tests {
         assert_eq!(hardware_name(), "TPM 2.0");
         assert!(!is_wsl());
     }
+
+    #[test]
+    fn hardware_name_is_one_of_known_values() {
+        let name = hardware_name();
+        assert!(
+            name == "Secure Enclave" || name == "TPM 2.0" || name == "none",
+            "unexpected hardware_name: {name}"
+        );
+    }
+
+    #[test]
+    fn is_macos_and_is_windows_are_mutually_exclusive() {
+        assert!(!(is_macos() && is_windows()));
+    }
+
+    #[test]
+    #[cfg(not(target_os = "linux"))]
+    fn is_wsl_false_on_non_linux() {
+        assert!(!is_wsl());
+    }
 }

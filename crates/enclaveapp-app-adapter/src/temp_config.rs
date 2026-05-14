@@ -184,13 +184,65 @@ mod tests {
         assert!(path.exists());
         assert_eq!(fs::read(&path).unwrap(), b"secret-data-here!");
 
-        // Keep a file descriptor open so we can read after shred but before unlink.
         // On drop, TempConfig shreds then TempDir deletes.
-        // We can't easily observe the shred-then-delete sequence, but we can
-        // verify the directory gets cleaned up.
         drop(temp);
 
         assert!(!path.exists(), "file should be deleted after drop");
         assert!(!dir_path.exists(), "dir should be deleted after drop");
+    }
+
+    #[test]
+    fn shred_file_nonexistent_path_is_noop() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nonexistent.bin");
+        // Should not panic or error
+        shred_file(&path);
+    }
+
+    #[test]
+    fn shred_file_empty_file_is_noop() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("empty.bin");
+        fs::write(&path, b"").expect("write empty");
+        shred_file(&path);
+        // File should still exist, still empty
+        assert_eq!(fs::read(&path).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn shred_file_large_file_all_zeros() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("large.bin");
+        let original: Vec<u8> = (0..=255_u8).cycle().take(1024).collect();
+        fs::write(&path, &original).expect("write");
+
+        shred_file(&path);
+
+        let after = fs::read(&path).expect("read");
+        assert_eq!(after.len(), 1024);
+        assert!(after.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn temp_config_write_empty_contents() {
+        let temp = TempConfig::write("test-", "empty.conf", b"").expect("empty temp config");
+        let contents = fs::read(temp.path()).expect("read");
+        assert!(contents.is_empty());
+    }
+
+    #[test]
+    fn temp_config_write_binary_contents() {
+        let data: Vec<u8> = (0..=255).collect();
+        let temp = TempConfig::write("test-", "bin.conf", &data).expect("binary temp config");
+        let contents = fs::read(temp.path()).expect("read");
+        assert_eq!(contents, data);
+    }
+
+    #[test]
+    fn temp_config_path_is_inside_temp_dir() {
+        let temp = TempConfig::write("test-", "config.conf", b"data").expect("temp config");
+        let path = temp.path();
+        assert!(path.exists());
+        assert_eq!(path.file_name().unwrap().to_str().unwrap(), "config.conf");
     }
 }

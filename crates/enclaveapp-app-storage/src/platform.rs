@@ -429,6 +429,81 @@ mod tests {
         assert_eq!(kind, cloned);
     }
 
+    #[test]
+    fn backend_kind_debug_nonempty() {
+        for kind in [
+            BackendKind::SecureEnclave,
+            BackendKind::Tpm,
+            BackendKind::TpmBridge,
+            BackendKind::Keyring,
+        ] {
+            let s = format!("{kind:?}");
+            assert!(!s.is_empty());
+        }
+    }
+
+    #[test]
+    fn backend_kind_all_variants_display_nonempty() {
+        for kind in [
+            BackendKind::SecureEnclave,
+            BackendKind::Tpm,
+            BackendKind::TpmBridge,
+            BackendKind::Keyring,
+        ] {
+            assert!(!kind.to_string().is_empty());
+        }
+    }
+
+    #[test]
+    fn backend_kind_all_pairs_not_equal() {
+        let kinds = [
+            BackendKind::SecureEnclave,
+            BackendKind::Tpm,
+            BackendKind::TpmBridge,
+            BackendKind::Keyring,
+        ];
+        for i in 0..kinds.len() {
+            for j in 0..kinds.len() {
+                if i != j {
+                    assert_ne!(kinds[i], kinds[j]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn verify_meta_integrity_succeeds_when_meta_file_absent() {
+        let dir = std::env::temp_dir().join(format!(
+            "enclaveapp-platform-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // No .meta file — verify_meta_integrity must return Ok without touching any secure store.
+        let result = verify_meta_integrity("test-app", &dir, "nonexistent-label");
+        assert!(result.is_ok());
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    fn check_meta_integrity_succeeds_when_meta_file_absent() {
+        let dir = std::env::temp_dir().join(format!(
+            "enclaveapp-platform-test2-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let result = check_meta_integrity("test-app", "nonexistent-label", &dir);
+        assert!(result.is_ok());
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn find_bridge_executable_returns_none_on_dev_machine() {

@@ -334,4 +334,103 @@ mod tests {
             .to_string()
             .contains("may be inconsistent"));
     }
+
+    // -----------------------------------------------------------------------
+    // Pure helper unit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn state_version_is_mutating_with_none_is_false() {
+        assert!(!state_version_is_mutating(None));
+    }
+
+    #[test]
+    fn state_version_is_mutating_with_mutating_prefix_is_true() {
+        assert!(state_version_is_mutating(Some("mutating:12345")));
+    }
+
+    #[test]
+    fn state_version_is_mutating_with_dirty_prefix_is_false() {
+        assert!(!state_version_is_mutating(Some("dirty:123")));
+    }
+
+    #[test]
+    fn state_version_is_mutating_with_stable_prefix_is_false() {
+        assert!(!state_version_is_mutating(Some("stable:123")));
+    }
+
+    #[test]
+    fn state_version_is_mutating_with_empty_string_is_false() {
+        assert!(!state_version_is_mutating(Some("")));
+    }
+
+    #[test]
+    fn state_version_is_dirty_with_none_is_false() {
+        assert!(!state_version_is_dirty(None));
+    }
+
+    #[test]
+    fn state_version_is_dirty_with_dirty_prefix_is_true() {
+        assert!(state_version_is_dirty(Some("dirty:67890")));
+    }
+
+    #[test]
+    fn state_version_is_dirty_with_mutating_prefix_is_false() {
+        assert!(!state_version_is_dirty(Some("mutating:123")));
+    }
+
+    #[test]
+    fn state_version_is_dirty_with_stable_prefix_is_false() {
+        assert!(!state_version_is_dirty(Some("stable:123")));
+    }
+
+    #[test]
+    fn state_version_is_dirty_with_empty_string_is_false() {
+        assert!(!state_version_is_dirty(Some("")));
+    }
+
+    #[test]
+    fn read_only_state_error_with_none_is_none() {
+        assert!(read_only_state_error(None).is_none());
+    }
+
+    #[test]
+    fn read_only_state_error_with_stable_is_none() {
+        assert!(read_only_state_error(Some("stable:42")).is_none());
+    }
+
+    #[test]
+    fn read_only_state_error_with_mutating_contains_mutating_message() {
+        let err = read_only_state_error(Some("mutating:99")).expect("should be an error");
+        assert!(err.to_string().contains("mutated") || err.to_string().contains("mutating"));
+    }
+
+    #[test]
+    fn read_only_state_error_with_dirty_contains_inconsistent_message() {
+        let err = read_only_state_error(Some("dirty:77")).expect("should be an error");
+        assert!(err.to_string().contains("inconsistent"));
+    }
+
+    #[test]
+    fn with_state_lock_happy_path_returns_value() {
+        let _env_lock = lock_env();
+        let dir = TempDir::new().expect("temp dir");
+        let _config_guard = EnvVarGuard::set(TEST_ENV_VAR, dir.path());
+
+        let result = with_state_lock(TEST_APP, || Ok(42_u32));
+        assert_eq!(result.expect("lock succeeded"), 42);
+    }
+
+    #[test]
+    fn with_state_lock_writes_stable_version_on_success() {
+        let _env_lock = lock_env();
+        let dir = TempDir::new().expect("temp dir");
+        let _config_guard = EnvVarGuard::set(TEST_ENV_VAR, dir.path());
+
+        with_state_lock(TEST_APP, || Ok(())).expect("lock succeeded");
+
+        let app_dir = app_data_dir(TEST_APP).expect("app dir");
+        let version = fs::read_to_string(state_version_path(&app_dir)).expect("state version");
+        assert!(version.starts_with(STATE_STABLE_PREFIX));
+    }
 }
