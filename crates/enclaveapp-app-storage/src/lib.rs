@@ -319,6 +319,7 @@ mod tests {
             wrapping_key_user_presence: false,
             wrapping_key_cache_ttl: std::time::Duration::ZERO,
             keychain_access_group: None,
+            prefer_windows_hello_ux: false,
         };
         assert_eq!(config.app_name, "myapp");
         assert_eq!(config.key_label, "default");
@@ -343,6 +344,7 @@ mod tests {
             wrapping_key_user_presence: true,
             wrapping_key_cache_ttl: std::time::Duration::from_secs(30),
             keychain_access_group: Some("TEAMID.com.example".into()),
+            prefer_windows_hello_ux: false,
         };
         assert!(config.wrapping_key_user_presence);
         assert_eq!(
@@ -368,6 +370,7 @@ mod tests {
             wrapping_key_user_presence: false,
             wrapping_key_cache_ttl: std::time::Duration::ZERO,
             keychain_access_group: None,
+            prefer_windows_hello_ux: false,
         };
         assert_eq!(config.keys_dir.as_ref(), Some(&dir));
         assert!(config.force_keyring);
