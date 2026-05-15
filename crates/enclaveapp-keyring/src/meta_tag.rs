@@ -308,6 +308,55 @@ mod tests {
     }
 
     #[test]
+    fn account_for_empty_label() {
+        assert_eq!(account_for(""), "__meta_tag___");
+    }
+
+    #[test]
+    fn account_for_contains_label_between_markers() {
+        let account = account_for("my-label");
+        assert!(account.starts_with("__meta_tag_"));
+        assert!(account.ends_with("__"));
+        assert!(account.contains("my-label"));
+    }
+
+    #[test]
+    fn meta_tag_len_is_32() {
+        assert_eq!(META_TAG_LEN, 32);
+    }
+
+    #[test]
+    fn verify_outcome_variants_equal_to_themselves() {
+        assert_eq!(VerifyOutcome::Match, VerifyOutcome::Match);
+        assert_eq!(VerifyOutcome::Tamper, VerifyOutcome::Tamper);
+        assert_eq!(VerifyOutcome::Legacy, VerifyOutcome::Legacy);
+        assert_eq!(VerifyOutcome::NoMeta, VerifyOutcome::NoMeta);
+        assert_eq!(
+            VerifyOutcome::KeychainUnavailable,
+            VerifyOutcome::KeychainUnavailable
+        );
+    }
+
+    #[test]
+    fn verify_outcome_distinct_variants_not_equal() {
+        assert_ne!(VerifyOutcome::Match, VerifyOutcome::Tamper);
+        assert_ne!(VerifyOutcome::Match, VerifyOutcome::NoMeta);
+        assert_ne!(VerifyOutcome::Legacy, VerifyOutcome::KeychainUnavailable);
+    }
+
+    #[cfg(not(all(feature = "keyring-storage", target_env = "gnu")))]
+    #[test]
+    fn rename_with_no_source_tag_returns_ok() {
+        // On non-keyring targets the stub load() returns Ok(None), so
+        // rename of a nonexistent entry is a no-op success. On gnu +
+        // keyring-storage the real keyring may be unavailable in CI
+        // (no Secret Service daemon), so we only assert this on the
+        // stub path.
+        let result = rename(&unique_app(), "ghost-src", "ghost-dst");
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn verify_no_meta_when_file_missing() {
         let dir = std::env::temp_dir().join(format!(
             "meta-tag-test-{}-{}",

@@ -49,3 +49,52 @@ impl From<enclaveapp_app_storage::StorageError> for AdapterError {
 }
 
 pub type Result<T> = std::result::Result<T, AdapterError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_variants_display_nonempty_messages() {
+        let variants: Vec<AdapterError> = vec![
+            AdapterError::Io(std::io::Error::other("io")),
+            AdapterError::Json(
+                serde_json::from_str::<()>("bad").expect_err("intentionally bad JSON"),
+            ),
+            AdapterError::MissingConfigDir,
+            AdapterError::MissingHomeDir,
+            AdapterError::ProgramNotFound("prog".into()),
+            AdapterError::UnsupportedShellResolution {
+                command: "cmd".into(),
+                raw: "raw".into(),
+            },
+            AdapterError::CommandVFailed {
+                command: "cmd".into(),
+                stderr: "err".into(),
+            },
+            AdapterError::NoSupportedIntegration,
+            AdapterError::Storage("details".into()),
+            AdapterError::MissingSecret("binding".into()),
+            AdapterError::MissingConfigOverride,
+            AdapterError::UnsupportedIntegration {
+                app: "app".into(),
+                integration: "T1".into(),
+            },
+            AdapterError::NoAvailableIntegrationCandidate,
+        ];
+        for variant in &variants {
+            let msg = variant.to_string();
+            assert!(!msg.is_empty(), "Display for {variant:?} must not be empty");
+        }
+    }
+
+    #[test]
+    fn from_storage_error_produces_storage_variant() {
+        use enclaveapp_app_storage::StorageError;
+        let storage_err = StorageError::EncryptionFailed("test encryption error".into());
+        let adapter_err = AdapterError::from(storage_err);
+        assert!(matches!(adapter_err, AdapterError::Storage(_)));
+        let msg = adapter_err.to_string();
+        assert!(msg.contains("test encryption error"), "message: {msg}");
+    }
+}

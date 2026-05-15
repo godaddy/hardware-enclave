@@ -112,4 +112,78 @@ mod tests {
         assert_eq!(loaded, cfg);
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    #[test]
+    fn load_toml_empty_file_uses_defaults() {
+        let dir = test_dir();
+        let path = dir.join("empty.toml");
+        std::fs::write(&path, "").unwrap();
+        let cfg: TestConfig = load_toml(&path).unwrap();
+        assert_eq!(cfg, TestConfig::default());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn load_toml_partial_fields_uses_defaults_for_missing() {
+        let dir = test_dir();
+        let path = dir.join("partial.toml");
+        std::fs::write(&path, "name = \"only-name\"\n").unwrap();
+        let cfg: TestConfig = load_toml(&path).unwrap();
+        assert_eq!(cfg.name, "only-name");
+        assert_eq!(cfg.count, 0);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn save_toml_overwrites_existing_file() {
+        let dir = test_dir();
+        let path = dir.join("overwrite.toml");
+        let first = TestConfig {
+            name: "first".into(),
+            count: 1,
+        };
+        let second = TestConfig {
+            name: "second".into(),
+            count: 2,
+        };
+        save_toml(&path, &first).unwrap();
+        save_toml(&path, &second).unwrap();
+        let loaded: TestConfig = load_toml(&path).unwrap();
+        assert_eq!(loaded, second);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn save_toml_produces_valid_toml_content() {
+        let dir = test_dir();
+        let path = dir.join("valid.toml");
+        let cfg = TestConfig {
+            name: "check".into(),
+            count: 5,
+        };
+        save_toml(&path, &cfg).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        // The output should be parseable TOML
+        let re_parsed: toml::Value = toml::from_str(&content).unwrap();
+        assert_eq!(re_parsed["name"].as_str().unwrap(), "check");
+        assert_eq!(re_parsed["count"].as_integer().unwrap(), 5);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn save_load_roundtrip_with_special_characters_in_name() {
+        let dir = test_dir();
+        let path = dir.join("special.toml");
+        let cfg = TestConfig {
+            name: "hello world / test".into(),
+            count: 42,
+        };
+        save_toml(&path, &cfg).unwrap();
+        let loaded: TestConfig = load_toml(&path).unwrap();
+        assert_eq!(loaded, cfg);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

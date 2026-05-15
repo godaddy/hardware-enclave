@@ -328,6 +328,51 @@ mod tests {
     }
 
     #[test]
+    fn service_name_for_npmenc() {
+        assert_eq!(service_name_for("npmenc"), "com.godaddy.npmenc.meta-tag");
+    }
+
+    #[test]
+    fn meta_tag_len_is_32() {
+        assert_eq!(META_TAG_LEN, 32);
+    }
+
+    #[test]
+    fn verify_outcome_variants_equal_to_themselves() {
+        assert_eq!(VerifyOutcome::Match, VerifyOutcome::Match);
+        assert_eq!(VerifyOutcome::Tamper, VerifyOutcome::Tamper);
+        assert_eq!(VerifyOutcome::Legacy, VerifyOutcome::Legacy);
+        assert_eq!(VerifyOutcome::NoMeta, VerifyOutcome::NoMeta);
+        assert_eq!(
+            VerifyOutcome::KeychainUnavailable,
+            VerifyOutcome::KeychainUnavailable
+        );
+    }
+
+    #[test]
+    fn verify_outcome_distinct_variants_not_equal() {
+        assert_ne!(VerifyOutcome::Match, VerifyOutcome::Tamper);
+        assert_ne!(VerifyOutcome::Match, VerifyOutcome::Legacy);
+        assert_ne!(VerifyOutcome::Match, VerifyOutcome::NoMeta);
+        assert_ne!(VerifyOutcome::Tamper, VerifyOutcome::Legacy);
+        assert_ne!(VerifyOutcome::Legacy, VerifyOutcome::NoMeta);
+        assert_ne!(VerifyOutcome::NoMeta, VerifyOutcome::KeychainUnavailable);
+    }
+
+    #[test]
+    fn verify_outcome_clone_equals_original() {
+        let original = VerifyOutcome::Tamper;
+        let cloned = original;
+        assert_eq!(original, cloned);
+    }
+
+    #[test]
+    fn store_rejects_empty_tag() {
+        let result = store(&unique_app(), "label", &[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn verify_no_meta_when_file_missing() {
         let dir = std::env::temp_dir().join(format!(
             "meta-tag-test-{}-{}",

@@ -306,4 +306,81 @@ mod tests {
         let _ = KeyType::Encryption;
         let _ = BackendKind::SecureEnclave;
     }
+
+    #[test]
+    fn storage_config_default_field_values() {
+        let config = StorageConfig {
+            app_name: "myapp".into(),
+            key_label: "default".into(),
+            access_policy: AccessPolicy::None,
+            extra_bridge_paths: vec![],
+            keys_dir: None,
+            force_keyring: false,
+            wrapping_key_user_presence: false,
+            wrapping_key_cache_ttl: std::time::Duration::ZERO,
+            keychain_access_group: None,
+            prefer_windows_hello_ux: false,
+        };
+        assert_eq!(config.app_name, "myapp");
+        assert_eq!(config.key_label, "default");
+        assert_eq!(config.access_policy, AccessPolicy::None);
+        assert!(config.extra_bridge_paths.is_empty());
+        assert!(config.keys_dir.is_none());
+        assert!(!config.force_keyring);
+        assert!(!config.wrapping_key_user_presence);
+        assert_eq!(config.wrapping_key_cache_ttl, std::time::Duration::ZERO);
+        assert!(config.keychain_access_group.is_none());
+    }
+
+    #[test]
+    fn storage_config_with_access_group() {
+        let config = StorageConfig {
+            app_name: "app".into(),
+            key_label: "key".into(),
+            access_policy: AccessPolicy::Any,
+            extra_bridge_paths: vec![],
+            keys_dir: None,
+            force_keyring: false,
+            wrapping_key_user_presence: true,
+            wrapping_key_cache_ttl: std::time::Duration::from_secs(30),
+            keychain_access_group: Some("TEAMID.com.example".into()),
+            prefer_windows_hello_ux: false,
+        };
+        assert!(config.wrapping_key_user_presence);
+        assert_eq!(
+            config.wrapping_key_cache_ttl,
+            std::time::Duration::from_secs(30)
+        );
+        assert_eq!(
+            config.keychain_access_group.as_deref(),
+            Some("TEAMID.com.example")
+        );
+    }
+
+    #[test]
+    fn storage_config_with_keys_dir_override() {
+        let dir = std::path::PathBuf::from("/custom/keys");
+        let config = StorageConfig {
+            app_name: "app".into(),
+            key_label: "key".into(),
+            access_policy: AccessPolicy::None,
+            extra_bridge_paths: vec!["/extra/path".into()],
+            keys_dir: Some(dir.clone()),
+            force_keyring: true,
+            wrapping_key_user_presence: false,
+            wrapping_key_cache_ttl: std::time::Duration::ZERO,
+            keychain_access_group: None,
+            prefer_windows_hello_ux: false,
+        };
+        assert_eq!(config.keys_dir.as_ref(), Some(&dir));
+        assert!(config.force_keyring);
+        assert_eq!(config.extra_bridge_paths.len(), 1);
+    }
+
+    #[cfg(feature = "mock")]
+    #[test]
+    fn mock_storage_env_constant_is_non_empty() {
+        assert!(!MOCK_STORAGE_ENV.is_empty());
+        assert!(MOCK_STORAGE_ENV.contains("ENCLAVEAPP"));
+    }
 }

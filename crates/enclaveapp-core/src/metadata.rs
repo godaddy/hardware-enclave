@@ -828,6 +828,54 @@ mod tests {
     }
 
     #[test]
+    fn constant_time_eq_empty_slices_are_equal() {
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn compute_meta_hmac_bytes_output_is_32_bytes() {
+        let tag = compute_meta_hmac_bytes(b"k", b"d");
+        assert_eq!(tag.len(), 32);
+    }
+
+    #[test]
+    fn compute_meta_hmac_bytes_is_deterministic() {
+        let key = b"stable-key";
+        let data = b"stable-data";
+        let a = compute_meta_hmac_bytes(key, data);
+        let b = compute_meta_hmac_bytes(key, data);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn compute_meta_hmac_bytes_long_key_exercises_hash_path() {
+        // key > 64 bytes (SHA-256 block size) triggers the hash-then-pad branch
+        let long_key = vec![0x5a_u8; 128];
+        let short_key = &long_key[..8];
+        let data = b"test-data";
+        let long_tag = compute_meta_hmac_bytes(&long_key, data);
+        let short_tag = compute_meta_hmac_bytes(short_key, data);
+        assert_ne!(long_tag, short_tag);
+        assert_eq!(long_tag.len(), 32);
+    }
+
+    #[test]
+    fn compute_meta_hmac_bytes_different_data_produces_different_tag() {
+        let key = b"same-key";
+        let tag_a = compute_meta_hmac_bytes(key, b"data-a");
+        let tag_b = compute_meta_hmac_bytes(key, b"data-b");
+        assert_ne!(tag_a, tag_b);
+    }
+
+    #[test]
+    fn compute_meta_hmac_bytes_different_key_produces_different_tag() {
+        let data = b"same-data";
+        let tag_a = compute_meta_hmac_bytes(b"key-a", data);
+        let tag_b = compute_meta_hmac_bytes(b"key-b", data);
+        assert_ne!(tag_a, tag_b);
+    }
+
+    #[test]
     fn key_meta_new_sets_timestamp() {
         let meta = KeyMeta::new("test", KeyType::Signing, AccessPolicy::None);
         assert_eq!(meta.label, "test");
@@ -835,6 +883,21 @@ mod tests {
         assert!(!meta.created.is_empty());
         let ts: u64 = meta.created.parse().unwrap();
         assert!(ts > 0);
+    }
+
+    #[test]
+    fn key_meta_clone_preserves_all_fields() {
+        let mut meta = KeyMeta::new(
+            "clone-test",
+            KeyType::Encryption,
+            AccessPolicy::BiometricOnly,
+        );
+        meta.set_app_field("field", "value");
+        let cloned = meta.clone();
+        assert_eq!(cloned.label, meta.label);
+        assert_eq!(cloned.key_type, meta.key_type);
+        assert_eq!(cloned.access_policy, meta.access_policy);
+        assert_eq!(cloned.get_app_field("field"), Some("value"));
     }
 
     #[test]
@@ -900,6 +963,27 @@ mod tests {
 
         assert!(synced.load(Ordering::SeqCst));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello world");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // File I/O not supported by Miri isolation
+    fn read_no_follow_reads_file_content() {
+        let dir = test_dir();
+        let path = dir.join("data.bin");
+        std::fs::write(&path, b"hello bytes").unwrap();
+        let result = read_no_follow(&path).unwrap();
+        assert_eq!(result, b"hello bytes");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // File I/O not supported by Miri isolation
+    fn read_no_follow_returns_error_for_missing_file() {
+        let dir = test_dir();
+        let path = dir.join("nonexistent.bin");
+        let result = read_no_follow(&path);
+        assert!(result.is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

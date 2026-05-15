@@ -201,6 +201,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn service_name_for_npmenc() {
+        assert_eq!(
+            service_name_for("npmenc"),
+            "com.godaddy.npmenc.migrate-marker"
+        );
+    }
+
+    #[test]
+    fn marker_payload_is_v1() {
+        assert_eq!(MARKER_PAYLOAD, b"v1");
+    }
+
+    #[test]
+    fn marker_account_is_completed() {
+        assert_eq!(MARKER_ACCOUNT, "__completed__");
+    }
+
+    #[test]
+    fn service_name_contains_app_name_and_suffix() {
+        let name = service_name_for("my-app");
+        assert!(name.contains("my-app"));
+        assert!(name.ends_with(".migrate-marker"));
+        assert!(name.starts_with("com.godaddy."));
+    }
+
     /// Real-keychain roundtrip: set / is_set true / clear / is_set
     /// false. Hits the legacy Keychain on the test runner.
     #[test]

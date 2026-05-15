@@ -626,4 +626,93 @@ export BAZ=\\escaped"#,
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    // Pure helper unit tests for ShellBlockConfig markers
+
+    #[test]
+    fn begin_marker_contains_app_name() {
+        let config = ShellBlockConfig::new("myapp", "content");
+        assert!(config.begin_marker().contains("myapp"));
+    }
+
+    #[test]
+    fn begin_marker_format_is_correct() {
+        let config = ShellBlockConfig::new("sshenc", "content");
+        assert_eq!(
+            config.begin_marker(),
+            "# BEGIN sshenc managed block -- do not edit"
+        );
+    }
+
+    #[test]
+    fn end_marker_contains_app_name() {
+        let config = ShellBlockConfig::new("myapp", "content");
+        assert!(config.end_marker().contains("myapp"));
+    }
+
+    #[test]
+    fn end_marker_format_is_correct() {
+        let config = ShellBlockConfig::new("sshenc", "content");
+        assert_eq!(config.end_marker(), "# END sshenc managed block");
+    }
+
+    #[test]
+    fn full_block_contains_begin_and_end_markers() {
+        let config = ShellBlockConfig::new("sshenc", "export SSH_AUTH_SOCK=test");
+        let block = config.full_block();
+        assert!(block.contains(&config.begin_marker()));
+        assert!(block.contains(&config.end_marker()));
+    }
+
+    #[test]
+    fn full_block_contains_block_content() {
+        let config = ShellBlockConfig::new("sshenc", "export SSH_AUTH_SOCK=test");
+        let block = config.full_block();
+        assert!(block.contains("export SSH_AUTH_SOCK=test"));
+    }
+
+    #[test]
+    fn full_block_structure_is_begin_content_end() {
+        let config = ShellBlockConfig::new("app", "body_line");
+        let block = config.full_block();
+        let begin_pos = block.find(&config.begin_marker()).unwrap();
+        let content_pos = block.find("body_line").unwrap();
+        let end_pos = block.find(&config.end_marker()).unwrap();
+        assert!(begin_pos < content_pos);
+        assert!(content_pos < end_pos);
+    }
+
+    #[test]
+    fn shell_config_paths_contains_bashrc() {
+        let home = Path::new("/home/user");
+        let paths = shell_config_paths(home);
+        assert!(paths.iter().any(|(_, p)| p.ends_with(".bashrc")));
+    }
+
+    #[test]
+    fn shell_config_paths_contains_zshrc() {
+        let home = Path::new("/home/user");
+        let paths = shell_config_paths(home);
+        assert!(paths.iter().any(|(_, p)| p.ends_with(".zshrc")));
+    }
+
+    #[test]
+    fn shell_config_paths_contains_profile() {
+        let home = Path::new("/home/user");
+        let paths = shell_config_paths(home);
+        assert!(paths.iter().any(|(_, p)| p.ends_with(".profile")));
+    }
+
+    #[test]
+    fn shell_config_paths_all_under_home() {
+        let home = Path::new("/home/testuser");
+        let paths = shell_config_paths(home);
+        assert!(!paths.is_empty());
+        for (_, path) in &paths {
+            assert!(
+                path.starts_with(home),
+                "path {path:?} should be under home dir"
+            );
+        }
+    }
 }

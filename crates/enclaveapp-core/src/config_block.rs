@@ -482,6 +482,141 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn custom_markers_exact_strings() {
+        let m = BlockMarkers::custom("##START", "##END");
+        assert_eq!(m.begin, "##START");
+        assert_eq!(m.end, "##END");
+    }
+
+    #[test]
+    fn custom_markers_used_in_find_block() {
+        let m = BlockMarkers::custom("// MANAGED START", "// MANAGED END");
+        let content = "code before\n// MANAGED START\nmanaged code\n// MANAGED END\ncode after\n";
+        assert!(find_block(content, &m).is_some());
+    }
+
+    #[test]
+    fn custom_markers_used_in_build_and_upsert() {
+        let m = BlockMarkers::custom("/* managed-start */", "/* managed-end */");
+        let block = build_block(&m, "content = 42;\n");
+        assert!(block.starts_with("/* managed-start */"));
+        assert!(block.ends_with("/* managed-end */"));
+        let result = upsert_block("", &m, &block);
+        assert!(has_block(&result, &m));
+    }
+
+    #[test]
+    fn build_block_body_already_has_trailing_newline() {
+        let m = BlockMarkers::standard("app");
+        let block = build_block(&m, "body line\n");
+        // Should not double the newline
+        assert!(!block.contains("\n\n# END"));
+        assert!(block.contains("body line\n# END"));
+    }
+
+    #[test]
+    fn build_block_empty_body() {
+        let m = BlockMarkers::standard("app");
+        let block = build_block(&m, "");
+        // Empty body still gets a newline before the end marker
+        assert!(block.contains("# BEGIN app managed block -- do not edit\n\n# END"));
+    }
+
+    #[test]
+    fn find_block_no_trailing_newline_at_end_of_string() {
+        let m = BlockMarkers::standard("app");
+        // End marker is at the very end of content with no trailing newline.
+        let content = "# BEGIN app managed block -- do not edit\nstuff\n# END app managed block";
+        let result = find_block(content, &m);
+        assert!(result.is_some());
+        let (start, end) = result.unwrap();
+        // No newline to consume
+        assert_eq!(end, content.len());
+        assert_eq!(
+            &content[start..end],
+            "# BEGIN app managed block -- do not edit\nstuff\n# END app managed block"
+        );
+    }
+
+    #[test]
+    fn remove_block_at_start_of_content() {
+        let m = BlockMarkers::standard("app");
+        let content = "# BEGIN app managed block -- do not edit\nmanaged\n# END app managed block\n\nafter content\n";
+        let (result, status) = remove_block(content, &m);
+        assert_eq!(status, BlockRemoveResult::Removed);
+        assert!(!result.contains("managed"));
+        assert!(result.contains("after content"));
+    }
+
+    #[test]
+    fn remove_block_at_end_of_content() {
+        let m = BlockMarkers::standard("app");
+        let content = "before content\n\n# BEGIN app managed block -- do not edit\nmanaged\n# END app managed block\n";
+        let (result, status) = remove_block(content, &m);
+        assert_eq!(status, BlockRemoveResult::Removed);
+        assert!(!result.contains("managed"));
+        assert!(result.contains("before content"));
+    }
+
+    #[test]
+    fn remove_block_leaves_empty_string_when_only_content() {
+        let m = BlockMarkers::standard("app");
+        let content = "# BEGIN app managed block -- do not edit\nonly\n# END app managed block\n";
+        let (result, status) = remove_block(content, &m);
+        assert_eq!(status, BlockRemoveResult::Removed);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn upsert_content_already_ending_with_double_newline() {
+        let m = BlockMarkers::standard("app");
+        let block = build_block(&m, "new\n");
+        // Content already ends with two newlines → should not add a third
+        let result = upsert_block("existing\n\n", &m, &block);
+        assert!(!result.contains("\n\n\n"));
+    }
+
+    #[test]
+    fn remove_block_from_file_missing_file_is_not_present() {
+        let path = Path::new("/nonexistent/absolutely/missing.conf");
+        let m = BlockMarkers::standard("app");
+        let result = remove_block_from_file(path, &m).unwrap();
+        assert_eq!(result, BlockRemoveResult::NotPresent);
+    }
+
+    #[test]
+    fn read_config_file_empty_file_returns_some_empty_string() {
+        let dir = std::env::temp_dir().join(format!(
+            "enclaveapp-config-block-empty-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("empty.conf");
+        std::fs::write(&path, "").unwrap();
+        let content = read_config_file(&path).unwrap();
+        assert_eq!(content, Some(String::new()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn has_block_false_with_only_begin_no_end() {
+        let m = BlockMarkers::standard("app");
+        let content = "# BEGIN app managed block -- do not edit\nstuff but no end";
+        assert!(!has_block(content, &m));
+    }
+
+    #[test]
+    fn markers_with_id_blocks_distinguish_by_id() {
+        // A block with id "foo" should not be found when searching for id "bar"
+        let m_foo = BlockMarkers::with_id("app", "foo");
+        let m_bar = BlockMarkers::with_id("app", "bar");
+        let content =
+            "# --- BEGIN app managed (foo) ---\ncontent\n# --- END app managed (foo) ---\n";
+        assert!(has_block(content, &m_foo));
+        assert!(!has_block(content, &m_bar));
+    }
+
     #[cfg(unix)]
     #[test]
     fn write_config_file_sets_permissions() {

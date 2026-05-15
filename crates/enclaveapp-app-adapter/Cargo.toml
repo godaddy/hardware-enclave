@@ -23,5 +23,9 @@ thiserror = { workspace = true }
 tracing = "0.1"
 zeroize = { workspace = true }
 
+[dev-dependencies]
+enclaveapp-app-storage = { workspace = true, features = ["mock"] }
+tempfile = { workspace = true }
+
 [lints]
 workspace = true

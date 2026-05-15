@@ -194,6 +194,24 @@ mod tests {
     }
 
     #[test]
+    fn decrypt_truncated_by_one_byte_fails() {
+        // A ciphertext that is longer than the nonce but missing the last
+        // byte of the GCM authentication tag must be rejected cleanly.
+        let storage = MockEncryptionStorage::new();
+        let mut ciphertext = storage.encrypt(b"truncation test").unwrap();
+        assert!(
+            ciphertext.len() > NONCE_SIZE,
+            "ciphertext must exceed nonce"
+        );
+        ciphertext.pop(); // remove last byte
+        let result = storage.decrypt(&ciphertext);
+        assert!(
+            result.is_err(),
+            "truncated ciphertext must return Err, not panic"
+        );
+    }
+
+    #[test]
     fn encrypt_empty_plaintext() {
         let storage = MockEncryptionStorage::new();
         let ciphertext = storage.encrypt(b"").unwrap();

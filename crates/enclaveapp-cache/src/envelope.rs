@@ -393,4 +393,116 @@ mod tests {
         let wrapped = wrap_plaintext(b"h", 0, b"");
         assert_eq!(wrapped.len(), ENVELOPE_OVERHEAD);
     }
+
+    #[test]
+    fn wrap_plaintext_empty_payload_produces_overhead_only() {
+        let wrapped = wrap_plaintext(b"header", 0, b"");
+        assert_eq!(wrapped.len(), ENVELOPE_OVERHEAD);
+        // Starts with the magic bytes
+        assert_eq!(&wrapped[..4], ENVELOPE_MAGIC);
+    }
+
+    #[test]
+    fn unwrap_too_short_is_treated_as_legacy() {
+        let header = b"h";
+        // Any buffer shorter than ENVELOPE_OVERHEAD is legacy
+        let short = &b"APL1"[..3]; // only 3 bytes, less than 44
+        let result = unwrap_plaintext(header, 0, short).unwrap();
+        match result {
+            Unwrapped::Legacy { payload } => assert_eq!(payload, short),
+            _ => panic!("expected Legacy for short buffer"),
+        }
+    }
+
+    #[test]
+    fn unwrap_exactly_overhead_empty_payload_roundtrips() {
+        let header = b"hdr";
+        let wrapped = wrap_plaintext(header, 1, b"");
+        let unwrapped = unwrap_plaintext(header, 0, &wrapped).unwrap();
+        match unwrapped {
+            Unwrapped::Versioned { counter, payload } => {
+                assert_eq!(counter, 1);
+                assert!(payload.is_empty());
+            }
+            _ => panic!("expected Versioned"),
+        }
+    }
+
+    #[test]
+    fn counter_path_no_extension_appends_counter_suffix() {
+        let p = Path::new("/tmp/cache/foo");
+        assert_eq!(counter_path(p), PathBuf::from("/tmp/cache/foo.counter"));
+    }
+
+    #[test]
+    fn counter_path_preserves_parent_directory() {
+        let p = Path::new("/var/cache/myapp/session.enc");
+        let cp = counter_path(p);
+        assert_eq!(cp.parent().unwrap(), Path::new("/var/cache/myapp"));
+    }
+
+    #[test]
+    fn read_counter_short_file_returns_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("short.enc");
+        // Write fewer than 8 bytes to the counter sidecar
+        let sidecar = counter_path(&cache_path);
+        std::fs::write(&sidecar, [0x00, 0x01]).unwrap();
+        assert_eq!(read_counter(&cache_path).unwrap(), 0);
+    }
+
+    #[test]
+    fn next_counter_both_zero_gives_one() {
+        assert_eq!(next_counter(0, 0), 1);
+    }
+
+    #[test]
+    fn next_counter_sidecar_larger_wins() {
+        assert_eq!(next_counter(100, 50), 101);
+    }
+
+    #[test]
+    fn next_counter_observed_larger_wins() {
+        assert_eq!(next_counter(50, 100), 101);
+    }
+
+    #[test]
+    fn unwrap_versioned_payload_method() {
+        let header = b"h";
+        let wrapped = wrap_plaintext(header, 5, b"secret");
+        let unwrapped = unwrap_plaintext(header, 0, &wrapped).unwrap();
+        assert_eq!(unwrapped.payload(), b"secret");
+    }
+
+    #[test]
+    fn unwrap_legacy_payload_method() {
+        let bytes = b"legacy-bytes-no-magic";
+        let result = unwrap_plaintext(b"h", 0, bytes).unwrap();
+        assert_eq!(result.payload(), bytes);
+    }
+
+    #[test]
+    fn unwrap_versioned_into_payload() {
+        let header = b"h";
+        let wrapped = wrap_plaintext(header, 3, b"data");
+        let unwrapped = unwrap_plaintext(header, 0, &wrapped).unwrap();
+        let payload = unwrapped.into_payload();
+        assert_eq!(payload, b"data");
+    }
+
+    #[test]
+    fn envelope_error_header_mismatch_display() {
+        let msg = format!("{}", EnvelopeError::HeaderMismatch);
+        assert!(msg.contains("header") || msg.contains("tamper") || msg.contains("modified"));
+    }
+
+    #[test]
+    fn envelope_error_rollback_display() {
+        let err = EnvelopeError::Rollback {
+            observed: 3,
+            expected_at_least: 10,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains('3') && msg.contains("10"));
+    }
 }

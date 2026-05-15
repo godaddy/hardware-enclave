@@ -264,4 +264,22 @@ mod tests {
     fn munlock_empty_buffer() {
         assert!(munlock_buffer(std::ptr::null(), 0));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn mlock_buffer_nonzero_length_does_not_panic() {
+        let data = [0_u8; 64];
+        // mlock may fail (RLIMIT_MEMLOCK) but must not panic
+        let _result = mlock_buffer(data.as_ptr(), data.len());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn munlock_after_mlock_does_not_panic() {
+        let data = [0_u8; 64];
+        if mlock_buffer(data.as_ptr(), data.len()) {
+            // If lock succeeded, unlock must succeed too
+            assert!(munlock_buffer(data.as_ptr(), data.len()));
+        }
+    }
 }

@@ -156,6 +156,26 @@ impl EncryptedFileSecretStore {
         })
     }
 
+    /// Test-only constructor that injects a pre-built `EncryptionStorage`
+    /// rather than letting the store lazily create a hardware-backed one.
+    /// This makes `EncryptedFileSecretStore` testable in CI without
+    /// platform credentials.
+    #[cfg(test)]
+    pub fn with_storage_for_test(dir: PathBuf, storage: Box<dyn EncryptionStorage>) -> Self {
+        let lock = OnceLock::new();
+        // OnceLock::set fails when already initialised. A fresh OnceLock always
+        // accepts the first set, so the only failure mode here is an unreachable
+        // double-init; map it to a panic with a useful message.
+        if lock.set(Ok(storage)).is_err() {
+            panic!("fresh OnceLock already initialised — this is a test bug");
+        }
+        Self {
+            app_name: "test".to_string(),
+            dir,
+            storage: lock,
+        }
+    }
+
     fn path_for(&self, id: &BindingId) -> PathBuf {
         self.dir.join(hash_id(id))
     }
@@ -645,6 +665,74 @@ mod tests {
     }
 
     #[test]
+    fn is_redacted_placeholder_true_for_sentinel() {
+        assert!(is_redacted_placeholder(REDACTED_PLACEHOLDER));
+    }
+
+    #[test]
+    fn is_redacted_placeholder_false_for_empty_string() {
+        assert!(!is_redacted_placeholder(""));
+    }
+
+    #[test]
+    fn is_redacted_placeholder_false_for_other_strings() {
+        assert!(!is_redacted_placeholder("real-token"));
+        assert!(!is_redacted_placeholder("<REDACTED>"));
+        assert!(!is_redacted_placeholder("redacted"));
+    }
+
+    #[test]
+    fn secret_read_is_present_false_for_redacted_and_absent() {
+        assert!(!SecretRead::Redacted.is_present());
+        assert!(!SecretRead::Absent.is_present());
+    }
+
+    #[test]
+    fn secret_read_is_redacted_false_for_present_and_absent() {
+        assert!(!SecretRead::Present("x".into()).is_redacted());
+        assert!(!SecretRead::Absent.is_redacted());
+    }
+
+    #[test]
+    fn secret_read_is_absent_false_for_present_and_redacted() {
+        assert!(!SecretRead::Present("x".into()).is_absent());
+        assert!(!SecretRead::Redacted.is_absent());
+    }
+
+    #[test]
+    fn secret_read_into_present_returns_value() {
+        let result = SecretRead::Present("my-token".into()).into_present();
+        assert_eq!(result, Some("my-token".into()));
+    }
+
+    #[test]
+    fn secret_read_clone_preserves_variant() {
+        let p = SecretRead::Present("v".into());
+        assert_eq!(p.clone(), p);
+        assert_eq!(SecretRead::Redacted.clone(), SecretRead::Redacted);
+        assert_eq!(SecretRead::Absent.clone(), SecretRead::Absent);
+    }
+
+    #[test]
+    fn memory_store_mark_redacted_makes_get_read_return_redacted() {
+        let store = MemorySecretStore::new();
+        let id = BindingId::new("npm:marked");
+        store.mark_redacted(&id).expect("mark_redacted");
+        assert_eq!(store.get_read(&id).expect("get_read"), SecretRead::Redacted);
+    }
+
+    #[test]
+    fn memory_store_mark_redacted_makes_legacy_get_return_sentinel() {
+        let store = MemorySecretStore::new();
+        let id = BindingId::new("npm:legacy");
+        store.mark_redacted(&id).expect("mark_redacted");
+        assert_eq!(
+            store.get(&id).expect("get"),
+            Some(REDACTED_PLACEHOLDER.to_string())
+        );
+    }
+
+    #[test]
     fn memory_store_get_nonexistent_returns_none() {
         let store = MemorySecretStore::new();
         let id = BindingId::new("npm:nonexistent");
@@ -668,5 +756,201 @@ mod tests {
         store.set(&id, "first").expect("set");
         store.set(&id, "second").expect("set");
         assert_eq!(store.get(&id).expect("get"), Some("second".to_string()));
+    }
+
+    // --- EncryptedFileSecretStore tests ---
+
+    fn make_encrypted_store() -> (tempfile::TempDir, EncryptedFileSecretStore) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let secrets_dir = dir.path().join("secrets");
+        let storage = enclaveapp_app_storage::mock::MockEncryptionStorage::new();
+        let store = EncryptedFileSecretStore::with_storage_for_test(secrets_dir, Box::new(storage));
+        (dir, store)
+    }
+
+    #[test]
+    fn encrypted_store_round_trip_same_instance() {
+        let (_dir, store) = make_encrypted_store();
+        let id = BindingId::new("test:round-trip");
+        store.set(&id, "secret-value").expect("set");
+        let result = store.get(&id).expect("get");
+        assert_eq!(result, Some("secret-value".to_string()));
+    }
+
+    #[test]
+    fn encrypted_store_get_nonexistent_returns_none() {
+        let (_dir, store) = make_encrypted_store();
+        let id = BindingId::new("test:missing");
+        assert_eq!(store.get(&id).expect("get"), None);
+    }
+
+    #[test]
+    fn encrypted_store_delete_removes_entry() {
+        let (_dir, store) = make_encrypted_store();
+        let id = BindingId::new("test:delete-me");
+        store.set(&id, "bye").expect("set");
+        assert!(store.delete(&id).expect("delete"));
+        assert_eq!(store.get(&id).expect("get after delete"), None);
+    }
+
+    #[test]
+    fn encrypted_store_delete_nonexistent_returns_false() {
+        let (_dir, store) = make_encrypted_store();
+        let id = BindingId::new("test:phantom");
+        assert!(!store.delete(&id).expect("delete non-existent"));
+    }
+
+    #[test]
+    fn encrypted_store_overwrite_returns_latest_value() {
+        let (_dir, store) = make_encrypted_store();
+        let id = BindingId::new("test:overwrite");
+        store.set(&id, "v1").expect("set v1");
+        store.set(&id, "v2").expect("set v2");
+        assert_eq!(store.get(&id).expect("get"), Some("v2".to_string()));
+    }
+
+    #[test]
+    fn encrypted_store_get_read_present() {
+        let (_dir, store) = make_encrypted_store();
+        let id = BindingId::new("test:get-read-present");
+        store.set(&id, "data").expect("set");
+        assert!(matches!(
+            store.get_read(&id).expect("get_read"),
+            SecretRead::Present(_)
+        ));
+    }
+
+    #[test]
+    fn encrypted_store_get_read_absent() {
+        let (_dir, store) = make_encrypted_store();
+        let id = BindingId::new("test:get-read-absent");
+        assert_eq!(store.get_read(&id).expect("get_read"), SecretRead::Absent);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn encrypted_store_creates_dir_with_restricted_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let secrets_dir = dir.path().join("secrets");
+        let storage = enclaveapp_app_storage::mock::MockEncryptionStorage::new();
+        let store =
+            EncryptedFileSecretStore::with_storage_for_test(secrets_dir.clone(), Box::new(storage));
+        let id = BindingId::new("test:perms");
+        store.set(&id, "check-perms").expect("set");
+        let meta = fs::metadata(&secrets_dir).expect("metadata");
+        assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn encrypted_store_creates_file_with_restricted_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let secrets_dir = dir.path().join("secrets");
+        let storage = enclaveapp_app_storage::mock::MockEncryptionStorage::new();
+        let store =
+            EncryptedFileSecretStore::with_storage_for_test(secrets_dir.clone(), Box::new(storage));
+        let id = BindingId::new("test:file-perms");
+        store.set(&id, "value").expect("set");
+        let path = store.path_for(&id);
+        let meta = fs::metadata(&path).expect("file metadata");
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn encrypted_store_persistence_across_fresh_instance() {
+        // Write via one store instance; read back via a fresh instance that
+        // shares the same directory and deterministic MockEncryptionStorage key.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let secrets_dir = dir.path().join("secrets");
+
+        // Use for_app (deterministic key) so both instances share the same key.
+        use enclaveapp_app_storage::mock::MockEncryptionStorage;
+        let id = BindingId::new("test:persist");
+
+        let store1 = EncryptedFileSecretStore::with_storage_for_test(
+            secrets_dir.clone(),
+            Box::new(MockEncryptionStorage::for_app("test")),
+        );
+        store1.set(&id, "persisted").expect("set");
+
+        let store2 = EncryptedFileSecretStore::with_storage_for_test(
+            secrets_dir.clone(),
+            Box::new(MockEncryptionStorage::for_app("test")),
+        );
+        assert_eq!(
+            store2.get(&id).expect("get from fresh instance"),
+            Some("persisted".to_string())
+        );
+    }
+
+    #[test]
+    fn encrypted_store_get_returns_error_for_truncated_file() {
+        let (_dir, store) = make_encrypted_store();
+        let id = BindingId::new("test:truncated");
+        store.set(&id, "some value").expect("set");
+        // Overwrite with zero bytes so base64-decode yields empty plaintext,
+        // which will fail the AES-GCM authentication tag check in decrypt().
+        fs::write(store.path_for(&id), b"").expect("truncate");
+        let result = store.get(&id);
+        assert!(result.is_err(), "truncated file must return Err, not panic");
+    }
+
+    #[test]
+    fn encrypted_store_get_returns_error_for_corrupt_ciphertext() {
+        let (_dir, store) = make_encrypted_store();
+        let id = BindingId::new("test:corrupt");
+        store.set(&id, "some value").expect("set");
+        // Random bytes that are not valid base64 → base64 decode error.
+        fs::write(store.path_for(&id), b"this is not valid ciphertext at all").expect("corrupt");
+        let result = store.get(&id);
+        assert!(
+            result.is_err(),
+            "corrupt ciphertext must return Err, not panic"
+        );
+    }
+
+    #[test]
+    fn encrypted_store_concurrent_writes_leave_file_valid() {
+        use enclaveapp_app_storage::mock::MockEncryptionStorage;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let secrets_dir = dir.path().join("secrets");
+        let id = BindingId::new("test:concurrent");
+
+        // Two stores sharing the same directory and deterministic key so
+        // either can decrypt the other's output.
+        let store_a = Arc::new(EncryptedFileSecretStore::with_storage_for_test(
+            secrets_dir.clone(),
+            Box::new(MockEncryptionStorage::for_app("test")),
+        ));
+        let store_b = Arc::new(EncryptedFileSecretStore::with_storage_for_test(
+            secrets_dir.clone(),
+            Box::new(MockEncryptionStorage::for_app("test")),
+        ));
+
+        let id_a = id.clone();
+        let id_b = id.clone();
+        let sa = Arc::clone(&store_a);
+        let sb = Arc::clone(&store_b);
+
+        let t_a = std::thread::spawn(move || sa.set(&id_a, "value-a").expect("set-a"));
+        let t_b = std::thread::spawn(move || sb.set(&id_b, "value-b").expect("set-b"));
+
+        t_a.join().expect("thread-a panicked");
+        t_b.join().expect("thread-b panicked");
+
+        // After both writes, the file must be readable and contain one of the two values.
+        let reader = EncryptedFileSecretStore::with_storage_for_test(
+            secrets_dir.clone(),
+            Box::new(MockEncryptionStorage::for_app("test")),
+        );
+        let result = reader.get(&id).expect("get after concurrent writes");
+        assert!(
+            result == Some("value-a".to_string()) || result == Some("value-b".to_string()),
+            "expected value-a or value-b, got {result:?}"
+        );
     }
 }

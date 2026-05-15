@@ -133,4 +133,56 @@ mod tests {
             "\"/Program Files/awsenc/awsenc\""
         );
     }
+
+    #[test]
+    fn quote_config_value_with_tab() {
+        // Tab is whitespace, must be quoted
+        let result = quote_config_value("key\tvalue");
+        assert!(result.starts_with('"'));
+        assert!(result.ends_with('"'));
+    }
+
+    #[test]
+    fn quote_config_value_only_backslash() {
+        assert_eq!(quote_config_value("\\"), "\"\\\\\"");
+    }
+
+    #[test]
+    fn quote_config_value_only_double_quote() {
+        assert_eq!(quote_config_value("\""), "\"\\\"\"");
+    }
+
+    #[test]
+    fn quote_config_value_backslash_and_space() {
+        // Both backslash and space present: both must be escaped
+        let result = quote_config_value("C:\\Program Files");
+        assert!(result.starts_with('"'));
+        assert!(result.contains("\\\\"));
+        assert!(result.contains(' '));
+    }
+
+    #[test]
+    fn quote_config_value_newline_is_quoted() {
+        // Newline is whitespace
+        let result = quote_config_value("line1\nline2");
+        assert!(result.starts_with('"'));
+    }
+
+    #[test]
+    fn quote_ssh_path_no_spaces_not_quoted() {
+        let path = PathBuf::from("/home/user/bin");
+        let result = quote_ssh_path(&path);
+        assert!(!result.starts_with('"'));
+        assert_eq!(result, "/home/user/bin");
+    }
+
+    #[test]
+    fn quote_credential_process_backslash_path() {
+        // Backslash triggers quoting regardless of spaces
+        let path = PathBuf::from("C:\\Windows\\System32\\app.exe");
+        let result = quote_credential_process_arg(&path);
+        assert!(result.starts_with('"'));
+        // Backslashes should be doubled
+        assert!(result.contains("\\\\"));
+    }
 }

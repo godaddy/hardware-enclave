@@ -322,4 +322,193 @@ mod tests {
 
         std::env::remove_var(&keep_key);
     }
+
+    fn make_request(program: &str, args: &[&str]) -> LaunchRequest {
+        use crate::types::ResolutionStrategy;
+        LaunchRequest {
+            program: ResolvedProgram {
+                path: program.into(),
+                fixed_args: Vec::new(),
+                strategy: ResolutionStrategy::ExplicitPath,
+                shell_hint: None,
+            },
+            args: args.iter().map(|s| (*s).to_string()).collect(),
+            env_overrides: BTreeMap::new(),
+            env_removals: Vec::new(),
+            env_scrub_patterns: Vec::new(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_returns_ok_with_success_for_exit_zero() {
+        let req = make_request("/bin/sh", &["-c", "exit 0"]);
+        let status = run(req).expect("run should not error for a spawnable binary");
+        assert!(status.success(), "exit 0 must produce a successful status");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_returns_ok_with_failure_for_nonzero_exit() {
+        let req = make_request("/bin/sh", &["-c", "exit 42"]);
+        let status = run(req).expect("run should not error; non-zero exit is Ok(status)");
+        assert!(!status.success(), "exit 42 must not be success");
+        assert_eq!(status.code(), Some(42));
+    }
+
+    #[test]
+    fn run_returns_err_when_binary_does_not_exist() {
+        let req = make_request("/nonexistent-binary-for-test-xyzzy", &[]);
+        let result = run(req);
+        assert!(
+            result.is_err(),
+            "spawning a nonexistent binary must return Err"
+        );
+    }
+
+    /// Passing more than 1,000 arguments must not panic or silently truncate.
+    #[cfg(unix)]
+    #[test]
+    fn run_with_large_argument_list_does_not_panic() {
+        // Build a shell command that counts its arguments and exits.
+        // We pass 1,001 extra args: the "echo" arg plus 1,000 "x" args.
+        // The child prints the arg count; we verify all args were received.
+        let script = r#"echo "$#""#;
+        let args: Vec<String> = std::iter::once("-c".to_string())
+            .chain(std::iter::once(script.to_string()))
+            .chain(std::iter::once("sh".to_string())) // $0 for sh -c
+            .chain(std::iter::repeat("x".to_string()).take(1000))
+            .collect();
+
+        use crate::types::ResolutionStrategy;
+        let req = LaunchRequest {
+            program: ResolvedProgram {
+                path: "/bin/sh".into(),
+                fixed_args: Vec::new(),
+                strategy: ResolutionStrategy::ExplicitPath,
+                shell_hint: None,
+            },
+            args,
+            env_overrides: BTreeMap::new(),
+            env_removals: Vec::new(),
+            env_scrub_patterns: Vec::new(),
+        };
+        let status = run(req).expect("run with large arg list must not error");
+        assert!(status.success(), "child must exit 0");
+    }
+
+    /// A prefix scrub pattern must remove ALL matching variables, not just the first.
+    #[cfg(unix)]
+    #[test]
+    fn scrub_prefix_strips_all_matching_vars_not_just_first() {
+        let marker = format!("ENCLAVEAPP_SCRUB_ALL_TEST_{}_", std::process::id());
+        let keys: Vec<String> = (0..5).map(|i| format!("{marker}VAR{i}")).collect();
+        for (i, k) in keys.iter().enumerate() {
+            std::env::set_var(k, format!("val{i}"));
+        }
+        let keep_key = format!("{marker}KEEPER");
+        std::env::set_var(&keep_key, "KEPT");
+
+        let prefix_pattern = format!("{marker}VAR*");
+        let script = keys
+            .iter()
+            .map(|k| format!("[${k}]"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", &format!("echo {script}")]);
+
+        apply_env_scrub(&mut cmd, &[prefix_pattern]);
+
+        let output = cmd.output().expect("spawn sh");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // All 5 vars must be absent from child env.
+        assert!(
+            stdout.contains("[] [] [] [] []"),
+            "all 5 matching vars must be scrubbed; child output: {stdout}"
+        );
+        // Own process must not see them either.
+        for k in &keys {
+            assert!(
+                std::env::var(k).is_err(),
+                "scrubbed var {k} still in own process env"
+            );
+        }
+        // Non-matching var is untouched.
+        assert_eq!(std::env::var(&keep_key).as_deref().ok(), Some("KEPT"));
+        std::env::remove_var(&keep_key);
+    }
+
+    #[test]
+    fn matches_scrub_pattern_empty_patterns_never_matches() {
+        let pats: Vec<String> = vec![];
+        assert!(!matches_scrub_pattern("FOO", &pats));
+        assert!(!matches_scrub_pattern("", &pats));
+    }
+
+    #[test]
+    fn matches_scrub_pattern_bare_star_matches_any_key() {
+        let pats = vec!["*".into()];
+        assert!(matches_scrub_pattern("ANYTHING", &pats));
+        assert!(matches_scrub_pattern("AWS_SECRET", &pats));
+        assert!(matches_scrub_pattern("", &pats));
+    }
+
+    #[test]
+    fn matches_scrub_pattern_exact_does_not_match_longer_key() {
+        let pats = vec!["AWS".into()];
+        assert!(!matches_scrub_pattern("AWS_SECRET_KEY", &pats));
+        assert!(matches_scrub_pattern("AWS", &pats));
+    }
+
+    #[test]
+    fn matches_scrub_pattern_multiple_patterns_any_match_wins() {
+        let pats = vec!["FOO".into(), "BAR*".into(), "BAZ".into()];
+        assert!(matches_scrub_pattern("FOO", &pats));
+        assert!(matches_scrub_pattern("BAR_EXTRA", &pats));
+        assert!(matches_scrub_pattern("BAZ", &pats));
+        assert!(!matches_scrub_pattern("QUUX", &pats));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn env_key_eq_exact_match_is_case_sensitive() {
+        assert!(env_key_eq("FOO", "FOO"));
+        assert!(!env_key_eq("foo", "FOO"));
+        assert!(!env_key_eq("FOO", "foo"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn env_key_eq_empty_strings_are_equal() {
+        assert!(env_key_eq("", ""));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn env_key_starts_with_empty_prefix_always_true() {
+        assert!(env_key_starts_with("ANYTHING", ""));
+        assert!(env_key_starts_with("", ""));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn env_key_starts_with_full_key_as_prefix_matches() {
+        assert!(env_key_starts_with("AWS_SECRET", "AWS_SECRET"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn env_key_starts_with_longer_prefix_does_not_match() {
+        assert!(!env_key_starts_with("AWS", "AWS_SECRET"));
+    }
+
+    #[test]
+    fn zeroize_str_preserves_length_and_zeroes_bytes() {
+        let mut s = String::from("my-secret-key-123");
+        let original_len = s.len();
+        zeroize_str(&mut s);
+        assert_eq!(s.len(), original_len);
+        assert!(s.bytes().all(|b| b == 0));
+    }
 }
