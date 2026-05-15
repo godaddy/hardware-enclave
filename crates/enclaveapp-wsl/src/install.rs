@@ -336,7 +336,10 @@ fn remove_runtime_files_in_distro(
     );
     let mut cmd = std::process::Command::new("wsl");
     cmd.args(["-d", distro_name, "-e", "bash", "-c", &script]);
-    let _ = enclaveapp_core::timeout::run_with_timeout(cmd, WSL_QUICK_CMD_TIMEOUT);
+    drop(enclaveapp_core::timeout::run_with_timeout(
+        cmd,
+        WSL_QUICK_CMD_TIMEOUT,
+    ));
     actions.push(format!("Cleaned up runtime files in ~/.{app_name}/"));
 }
 
@@ -628,7 +631,7 @@ mod tests {
         let pid = std::process::id();
         let dir =
             std::env::temp_dir().join(format!("enclaveapp-wsl-install-test-{pid}-{id}-{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
