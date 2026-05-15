@@ -871,6 +871,31 @@ jobs:
               end
             end
 
+            def uninstall
+              # Run the app's own uninstall command before Homebrew removes the
+              # binary. This cleans up the SSH config block, shell rc snippet,
+              # and LaunchAgent plist so a broken agent job isn't left pointing
+              # at a deleted binary after `brew uninstall`. Idempotent: safe to
+              # call even if the app was never configured.
+              quiet_system "#{bin}/#{name}", "uninstall"
+            end
+
+            def caveats
+              <<~EOS
+                After installing, run:
+                  #{name} install
+
+                This configures SSH to use #{name} and starts the agent.
+
+                Before uninstalling with `brew uninstall #{name}`, run:
+                  #{name} uninstall
+
+                Or simply run `brew uninstall #{name}` — the formula's uninstall
+                hook calls `#{name} uninstall` automatically while the binary is
+                still present.
+              EOS
+            end
+
             test do
               assert_match "${app}", shell_output("#{bin}/${app} --help 2>&1", 2)
             end

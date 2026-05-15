@@ -76,6 +76,12 @@ pub struct WslInstallConfig {
     /// GitHub at install time and extract the named binaries into
     /// `/usr/local/bin/`. Replaces the old socat+npiperelay dance.
     pub auto_install_linux_release: Option<LinuxReleaseSpec>,
+    /// Binaries to remove from `/usr/local/bin/` on unconfigure.
+    /// Set regardless of release/dev status so a `sshenc uninstall`
+    /// from a dev build still removes binaries installed by a prior
+    /// release build. Leave empty for apps that don't install to
+    /// `/usr/local/bin/` (e.g. apps that only use `linux_binary_target`).
+    pub linux_binaries_to_remove: Vec<String>,
 }
 
 /// Result of configuring or unconfiguring a single distro.
@@ -237,7 +243,104 @@ fn unconfigure_distro(
         }
     }
 
+    // Remove /usr/local/bin/ binaries installed by auto_install_linux_release.
+    #[cfg(target_os = "windows")]
+    if !config.linux_binaries_to_remove.is_empty() {
+        remove_linux_release_binaries(&distro.name, &config.linux_binaries_to_remove, &mut actions);
+    }
+
+    // Clean up the app's runtime directory (~/.sshenc/ or ~/.{app_name}/).
+    // This removes the agent socket and pid file; the keys subdirectory
+    // is intentionally preserved (it contains user key material).
+    #[cfg(target_os = "windows")]
+    {
+        let app = &config.app_name;
+        let runtime_dir = home_path.join(format!(".{app}"));
+        if runtime_dir.exists() {
+            remove_runtime_files_in_distro(&distro.name, &runtime_dir, app, &mut actions);
+        }
+    }
+
     Ok(actions)
+}
+
+/// Remove the listed binaries from `/usr/local/bin/` inside a WSL distro.
+/// Uses `sudo rm -f` — same privilege escalation path as the install side.
+/// Best-effort: failures are reported as warnings, not errors.
+#[cfg(target_os = "windows")]
+fn remove_linux_release_binaries(
+    distro_name: &str,
+    binaries: &[String],
+    actions: &mut Vec<String>,
+) {
+    let rm_args: Vec<String> = binaries
+        .iter()
+        .map(|b| format!("/usr/local/bin/{b}"))
+        .collect();
+    let script = format!(
+        "set -e\nfor b in {}; do sudo rm -f \"$b\" 2>/dev/null || true; done",
+        rm_args
+            .iter()
+            .map(|p| format!("'{p}'"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    let mut cmd = std::process::Command::new("wsl");
+    cmd.args(["-d", distro_name, "-e", "bash", "-c", &script]);
+    match enclaveapp_core::timeout::run_with_timeout(cmd, WSL_QUICK_CMD_TIMEOUT) {
+        Ok(enclaveapp_core::timeout::TimeoutResult::Completed(output))
+            if output.status.success() =>
+        {
+            actions.push(format!(
+                "Removed {} from /usr/local/bin/",
+                binaries.join(", ")
+            ));
+        }
+        Ok(enclaveapp_core::timeout::TimeoutResult::Completed(output)) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            actions.push(format!(
+                "Warning: could not remove binaries from /usr/local/bin/ ({})",
+                stderr.lines().next().unwrap_or("unknown error")
+            ));
+        }
+        Ok(enclaveapp_core::timeout::TimeoutResult::TimedOut) => {
+            actions.push("Warning: timed out removing binaries from /usr/local/bin/".to_string());
+        }
+        Err(e) => {
+            actions.push(format!(
+                "Warning: could not launch wsl to remove binaries: {e}"
+            ));
+        }
+    }
+}
+
+/// Remove agent runtime files (socket, pid) from the app's home dir in the
+/// distro. Leaves subdirectories (e.g. `keys/`) intact.
+#[cfg(target_os = "windows")]
+fn remove_runtime_files_in_distro(
+    distro_name: &str,
+    runtime_dir: &Path,
+    app_name: &str,
+    actions: &mut Vec<String>,
+) {
+    let dir = runtime_dir.display().to_string();
+    // Kill any running agent, then remove the socket and pid file.
+    // `rmdir` at the end removes the directory only if it is now empty
+    // (i.e. keys/ is gone too); if not, it is silently left behind.
+    let script = format!(
+        "set -e\n\
+         pkill -TERM -x {app_name}-agent 2>/dev/null || true\n\
+         sleep 0.3\n\
+         rm -f '{dir}/agent.sock' '{dir}/agent.pid'\n\
+         rmdir '{dir}' 2>/dev/null || true"
+    );
+    let mut cmd = std::process::Command::new("wsl");
+    cmd.args(["-d", distro_name, "-e", "bash", "-c", &script]);
+    drop(enclaveapp_core::timeout::run_with_timeout(
+        cmd,
+        WSL_QUICK_CMD_TIMEOUT,
+    ));
+    actions.push(format!("Cleaned up runtime files in ~/.{app_name}/"));
 }
 
 /// Inject the managed shell block into shell config files.
@@ -528,7 +631,7 @@ mod tests {
         let pid = std::process::id();
         let dir =
             std::env::temp_dir().join(format!("enclaveapp-wsl-install-test-{pid}-{id}-{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -652,6 +755,7 @@ mod tests {
             auto_install_linux_release: None,
             linux_binary_path: None,
             linux_binary_target: None,
+            linux_binaries_to_remove: vec![],
         };
         let result = unconfigure_distro(&distro, &config).unwrap();
         assert!(result.iter().any(|a| a.contains("Removed")));
@@ -705,6 +809,7 @@ mod tests {
             auto_install_linux_release: None,
             linux_binary_path: None,
             linux_binary_target: None,
+            linux_binaries_to_remove: vec![],
         };
         let cloned = config.clone();
         assert_eq!(cloned.app_name, config.app_name);
@@ -748,6 +853,7 @@ mod tests {
             auto_install_linux_release: None,
             linux_binary_path: None,
             linux_binary_target: None,
+            linux_binaries_to_remove: vec![],
         };
 
         let result = configure_distro(&distro, &config).unwrap();
@@ -785,6 +891,7 @@ mod tests {
             auto_install_linux_release: None,
             linux_binary_path: None,
             linux_binary_target: None,
+            linux_binaries_to_remove: vec![],
         };
         let result = unconfigure_distro(&distro, &config).unwrap();
         assert!(result.iter().any(|a| a.contains("Removed")));
