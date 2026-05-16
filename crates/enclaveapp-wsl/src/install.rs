@@ -76,6 +76,9 @@ pub struct WslInstallConfig {
     /// GitHub at install time and extract the named binaries into
     /// `/usr/local/bin/`. Replaces the old socat+npiperelay dance.
     pub auto_install_linux_release: Option<LinuxReleaseSpec>,
+    /// Names of Linux binaries to remove from `/usr/local/bin/` during
+    /// uninstall. Mirrors the set installed via `auto_install_linux_release`.
+    pub linux_binaries_to_remove: Vec<String>,
 }
 
 /// Result of configuring or unconfiguring a single distro.
@@ -235,6 +238,16 @@ fn unconfigure_distro(
             std::fs::remove_file(&binary_path).map_err(|e| format!("remove binary: {e}"))?;
             actions.push(format!("Removed ~/{target}"));
         }
+    }
+
+    // Remove binaries installed into /usr/local/bin/ by auto_install_linux_release.
+    #[cfg(target_os = "windows")]
+    if !config.linux_binaries_to_remove.is_empty() {
+        remove_linux_release_binaries(
+            &distro.name,
+            &config.linux_binaries_to_remove,
+            &mut actions,
+        )?;
     }
 
     Ok(actions)
@@ -515,6 +528,56 @@ fn install_linux_release(
 // Removed rather than dead-coded so the per-distro setup path stays
 // transparent.
 
+/// Remove binaries from `/usr/local/bin/` inside a WSL distro.
+/// Called during `uninstall` to undo what `auto_install_linux_release` put in place.
+#[cfg(target_os = "windows")]
+fn remove_linux_release_binaries(
+    distro_name: &str,
+    binaries: &[String],
+    actions: &mut Vec<String>,
+) -> Result<(), String> {
+    let rm_cmds: String = binaries
+        .iter()
+        .map(|b| format!("sudo rm -f \"/usr/local/bin/{b}\""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let script = format!("set -e\n{rm_cmds}\n");
+    let mut cmd = std::process::Command::new("wsl");
+    cmd.args(["-d", distro_name, "-e", "bash", "-c", &script]);
+    match enclaveapp_core::timeout::run_with_timeout(cmd, WSL_QUICK_CMD_TIMEOUT) {
+        Ok(enclaveapp_core::timeout::TimeoutResult::Completed(output))
+            if output.status.success() =>
+        {
+            actions.push(format!(
+                "Removed {} from /usr/local/bin/",
+                binaries.join(", ")
+            ));
+            Ok(())
+        }
+        Ok(enclaveapp_core::timeout::TimeoutResult::TimedOut) => {
+            actions.push(format!(
+                "Warning: binary removal timed out after {}s",
+                WSL_QUICK_CMD_TIMEOUT.as_secs()
+            ));
+            Ok(())
+        }
+        Ok(enclaveapp_core::timeout::TimeoutResult::Completed(output)) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            actions.push(format!(
+                "Warning: failed to remove binaries from /usr/local/bin/ ({})",
+                stderr.lines().next().unwrap_or("no stderr")
+            ));
+            Ok(())
+        }
+        Err(e) => {
+            actions.push(format!(
+                "Warning: failed to launch wsl for binary removal ({e})"
+            ));
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, let_underscore_drop)]
 mod tests {
@@ -652,6 +715,7 @@ mod tests {
             auto_install_linux_release: None,
             linux_binary_path: None,
             linux_binary_target: None,
+            linux_binaries_to_remove: vec![],
         };
         let result = unconfigure_distro(&distro, &config).unwrap();
         assert!(result.iter().any(|a| a.contains("Removed")));
@@ -705,6 +769,7 @@ mod tests {
             auto_install_linux_release: None,
             linux_binary_path: None,
             linux_binary_target: None,
+            linux_binaries_to_remove: vec![],
         };
         let cloned = config.clone();
         assert_eq!(cloned.app_name, config.app_name);
@@ -748,6 +813,7 @@ mod tests {
             auto_install_linux_release: None,
             linux_binary_path: None,
             linux_binary_target: None,
+            linux_binaries_to_remove: vec![],
         };
 
         let result = configure_distro(&distro, &config).unwrap();
@@ -785,6 +851,7 @@ mod tests {
             auto_install_linux_release: None,
             linux_binary_path: None,
             linux_binary_target: None,
+            linux_binaries_to_remove: vec![],
         };
         let result = unconfigure_distro(&distro, &config).unwrap();
         assert!(result.iter().any(|a| a.contains("Removed")));
