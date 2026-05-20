@@ -12,8 +12,11 @@
 //! consuming app's name so the per-platform install-dir conventions
 //! can flex:
 //!
-//! - Unix: `~/.local/bin`, `~/.cargo/bin`, `/opt/homebrew/bin`,
+//! - Unix: `~/.local/bin`, `/opt/homebrew/bin`,
 //!   `/usr/local/bin`, `/usr/bin`, then current-exe sibling as fallback.
+//!   **`~/.cargo/bin` is deliberately excluded** — unsigned development
+//!   builds must not be trusted for operations accessing hardware security
+//!   modules (Secure Enclave, TPM).
 //! - Windows: current-exe sibling,
 //!   `%LOCALAPPDATA%\<app_name>\bin`,
 //!   `%ProgramFiles%\<app_name>`,
@@ -107,9 +110,15 @@ fn candidate_dirs(context: &BinaryDiscoveryContext, app_name: &str) -> Vec<PathB
         // Stable dirs first so callers receive an upgrade-surviving symlink
         // path (e.g. /opt/homebrew/bin/sshenc) rather than a versioned Cellar
         // path that breaks when Homebrew removes the old version.
+        //
+        // SECURITY: ~/.cargo/bin is deliberately excluded. Development builds
+        // (cargo build, cargo install) must not be trusted for operations that
+        // access hardware security modules (Secure Enclave, TPM). Unsigned
+        // binaries from ~/.cargo/bin can poison keychain state and cause
+        // authentication failures. Production installs should use package
+        // managers (Homebrew, apt, etc.) or ~/.local/bin for manual installs.
         if let Some(home_dir) = context.home_dir.as_ref() {
             dirs.push(home_dir.join(".local").join("bin"));
-            dirs.push(home_dir.join(".cargo").join("bin"));
         }
         dirs.push(PathBuf::from("/opt/homebrew/bin"));
         dirs.push(PathBuf::from("/usr/local/bin"));
