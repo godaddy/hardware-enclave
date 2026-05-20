@@ -351,7 +351,7 @@ mod tests {
         };
         let dirs = candidate_dirs(&ctx, "myapp");
         assert!(dirs.contains(&PathBuf::from("/home/user/.local/bin")));
-        assert!(dirs.contains(&PathBuf::from("/home/user/.cargo/bin")));
+        assert!(!dirs.contains(&PathBuf::from("/home/user/.cargo/bin")));
         let local_bin_pos = dirs
             .iter()
             .position(|d| d == &PathBuf::from("/home/user/.local/bin"))

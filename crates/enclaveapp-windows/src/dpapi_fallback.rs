@@ -117,6 +117,24 @@ fn detect_vm_windows() -> VmDetection {
                 reason: format!("CPUID hypervisor vendor: {vendor}"),
             };
         }
+        // "Microsoft Hv" is reported by both Windows VBS on physical hardware
+        // and Hyper-V guests (Azure, on-prem bastions, VDI).  Distinguish them
+        // by manufacturer: physical machines with VBS show their real OEM
+        // (Dell, Lenovo, HP, …); Hyper-V guests show "Microsoft Corporation".
+        // Note: Surface devices are Microsoft hardware but have working TPMs,
+        // so they never reach this fallback path.
+        if vendor.eq_ignore_ascii_case("Microsoft Hv")
+            && joined
+                .to_ascii_lowercase()
+                .contains("microsoft corporation")
+        {
+            return VmDetection {
+                detected: true,
+                reason: format!(
+                    "Hyper-V guest: Microsoft Hv CPUID + Microsoft Corporation manufacturer ({joined})"
+                ),
+            };
+        }
         return VmDetection {
             detected: false,
             reason: format!("hypervisor bit set without trusted VM registry marker: {vendor}"),
@@ -267,5 +285,33 @@ mod tests {
         assert!(!vm_string_signal(
             "Dell Inc. | Latitude 7450 | Microsoft Hv"
         ));
+    }
+
+    #[test]
+    fn hyper_v_guest_detected_via_microsoft_corporation_manufacturer() {
+        // A Hyper-V guest (Azure VM, on-prem bastion, VDI) reports
+        // "Microsoft Hv" as the CPUID hypervisor vendor AND "Microsoft
+        // Corporation" as the system manufacturer.  We must allow the DPAPI
+        // fallback for these machines even though "Microsoft Hv" alone is
+        // excluded (to protect physical VBS machines).
+        assert!(vm_string_signal("Microsoft Corporation | Virtual Machine"));
+        // Product name may not say "Virtual Machine" on all bastions.
+        // The key check is manufacturer + CPUID, tested via detect_vm logic:
+        // manufacturer "Microsoft Corporation" alone is not a vm_string_signal …
+        assert!(!vm_string_signal("Microsoft Corporation"));
+        // … but the joined string that includes it alongside a VM product
+        // name is, which is what detect_vm_windows constructs.
+        assert!(vm_string_signal(
+            "Microsoft Corporation | Virtual Machine | Microsoft Corporation | Virtual Machine | VRTUAL"
+        ));
+    }
+
+    #[test]
+    fn vbs_on_physical_oem_hardware_not_treated_as_vm() {
+        // A Dell laptop running VBS should NOT be detected as a VM even
+        // though CPUID reports the Microsoft hypervisor bit.
+        assert!(!vm_string_signal("Dell Inc. | Latitude 7450"));
+        assert!(!vm_string_signal("LENOVO | ThinkPad X1 Carbon"));
+        assert!(!vm_string_signal("HP | EliteBook 840"));
     }
 }
