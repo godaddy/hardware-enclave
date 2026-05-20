@@ -12,7 +12,10 @@
 //!
 //! For encryption (awsenc, sso-jwt):
 //! ```no_run
-//! use enclaveapp_app_storage::{AppEncryptionStorage, StorageConfig, AccessPolicy, EncryptionStorage};
+//! use enclaveapp_app_storage::{
+//!     AccessPolicy, AppEncryptionStorage, EncryptionStorage, StorageConfig,
+//!     WindowsSoftwareFallback,
+//! };
 //!
 //! let storage = AppEncryptionStorage::init(StorageConfig {
 //!     app_name: "myapp".into(),
@@ -35,7 +38,9 @@
 //!
 //! For signing (sshenc):
 //! ```no_run
-//! use enclaveapp_app_storage::{AppSigningBackend, StorageConfig, AccessPolicy};
+//! use enclaveapp_app_storage::{
+//!     AccessPolicy, AppSigningBackend, StorageConfig, WindowsSoftwareFallback,
+//! };
 //!
 //! let backend = AppSigningBackend::init(StorageConfig {
 //!     app_name: "sshenc".into(),

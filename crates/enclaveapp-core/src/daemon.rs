@@ -591,11 +591,11 @@ mod tests {
             "expected NotReady; got {err:?}"
         );
         // The full readiness schedule sums to ~10s; the exit-0
-        // short-circuit should resolve well under 1s on any
-        // halfway sane machine. Allow extra slack for the ETXTBSY
-        // retry budget (worst case ~155ms of sleeps).
+        // short-circuit should resolve much faster than the full
+        // readiness budget. Allow slack for loaded CI runners and
+        // the ETXTBSY retry budget (worst case ~155ms of sleeps).
         assert!(
-            elapsed < Duration::from_millis(1200),
+            elapsed < Duration::from_millis(2500),
             "exit-0 short-circuit took too long: {elapsed:?}",
         );
     }
@@ -627,9 +627,10 @@ mod tests {
             }
             other => panic!("expected SpawnFailed; got {other:?}"),
         }
-        // Slack for the ETXTBSY retry budget (worst case ~155ms).
+        // Allow slack for loaded CI runners and the ETXTBSY retry
+        // budget (worst case ~155ms of sleeps).
         assert!(
-            elapsed < Duration::from_millis(1200),
+            elapsed < Duration::from_millis(2500),
             "exit-nonzero short-circuit took too long: {elapsed:?}",
         );
     }

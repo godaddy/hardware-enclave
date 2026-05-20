@@ -354,10 +354,33 @@ mod tests {
     use std::env;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+    #[cfg(unix)]
+    use std::sync::Mutex;
 
     use super::*;
     #[cfg(unix)]
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(unix)]
+    fn write_executable(path: &Path, contents: &[u8]) {
+        use std::io::Write as _;
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .expect("create executable");
+        file.write_all(contents).expect("write executable");
+        file.sync_all().expect("sync executable");
+        drop(file);
+
+        let mut perms = std::fs::metadata(path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).expect("chmod executable");
+    }
 
     #[cfg(unix)]
     #[test]
@@ -370,16 +393,10 @@ mod tests {
 
         // command -v returns "cmd" (relative, not absolute → triggers symbolic resolution)
         // command -V returns the alias line that points back to itself.
-        std::fs::write(
+        write_executable(
             &shell_path,
             b"#!/bin/sh\ncmd=\"$2\"\ncase \"$cmd\" in\n  \"command -v -- 'cmd'\") printf 'cmd\\n' ;;\n  \"command -V -- 'cmd'\") printf 'cmd is an alias for cmd\\n' ;;\n  *) exit 1 ;;\nesac\n",
-        )
-        .expect("write fake shell");
-        let mut perms = std::fs::metadata(&shell_path)
-            .expect("metadata")
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&shell_path, perms).expect("chmod");
+        );
 
         let err = resolve_program(
             "cmd",
@@ -406,6 +423,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolve_in_path_only_mode_with_shell_env_absent_does_not_panic() {
+        let _env_guard = ENV_LOCK.lock().expect("env lock");
         // PathOnly mode never consults the SHELL env var. Removing SHELL
         // and calling in PathOnly mode must not panic even if the command
         // is absent.
@@ -434,6 +452,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn empty_path_component_does_not_panic() {
+        let _env_guard = ENV_LOCK.lock().expect("env lock");
         // PATH with a leading or trailing colon contains an empty component.
         // env::split_paths returns an empty PathBuf for the empty component.
         // The resolver must handle this gracefully: no panic, returns ProgramNotFound.
@@ -467,10 +486,7 @@ mod tests {
     fn resolves_explicit_path() {
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path().join("npm");
-        std::fs::write(&path, b"#!/bin/sh\n").expect("write");
-        let mut perms = std::fs::metadata(&path).expect("metadata").permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).expect("chmod");
+        write_executable(&path, b"#!/bin/sh\n");
 
         let resolved = resolve_program(
             "npm",
@@ -556,32 +572,23 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolves_alias_chain_via_fake_shell() {
+        let _env_guard = ENV_LOCK.lock().expect("env lock");
         let dir = TempDir::new().expect("temp dir");
         let shell_path = dir.path().join("fake-shell");
         let asdf_path = dir.path().join("asdf");
         let original_path = env::var_os("PATH");
 
-        std::fs::write(
+        write_executable(
             &shell_path,
             format!(
                 "#!/bin/sh\ncmd=\"$2\"\ncase \"$cmd\" in\n  \"command -v -- 'npm'\") printf 'npm\\n' ;;\n  \"command -V -- 'npm'\") printf 'npm is an alias for asdf exec npm\\n' ;;\n  \"command -v -- 'asdf'\") printf '{}\\n' ;;\n  \"command -V -- 'asdf'\") printf '{}\\n' ;;\n  *) exit 1 ;;\nesac\n",
                 asdf_path.display(),
                 asdf_path.display()
-            ),
-        )
-        .expect("write shell");
-        let mut shell_perms = std::fs::metadata(&shell_path)
-            .expect("metadata")
-            .permissions();
-        shell_perms.set_mode(0o755);
-        std::fs::set_permissions(&shell_path, shell_perms).expect("chmod shell");
+            )
+            .as_bytes(),
+        );
 
-        std::fs::write(&asdf_path, b"#!/bin/sh\n").expect("write asdf");
-        let mut asdf_perms = std::fs::metadata(&asdf_path)
-            .expect("metadata")
-            .permissions();
-        asdf_perms.set_mode(0o755);
-        std::fs::set_permissions(&asdf_path, asdf_perms).expect("chmod asdf");
+        write_executable(&asdf_path, b"#!/bin/sh\n");
         env::set_var("PATH", dir.path());
 
         let resolved = resolve_program(
@@ -611,13 +618,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn auto_resolution_prefers_command_v_over_path_lookup() {
+        let _env_guard = ENV_LOCK.lock().expect("env lock");
         let dir = TempDir::new().expect("temp dir");
         let shell_path = dir.path().join("fake-shell");
         let shim_path = dir.path().join("npm");
         let real_path = dir.path().join("real-npm");
         let original_path = env::var_os("PATH");
 
-        std::fs::write(
+        write_executable(
             &shell_path,
             format!(
                 "#!/bin/sh\ncmd=\"$2\"\ncase \"$cmd\" in\n  \"command -v -- 'npm'\") printf 'npm\\n' ;;\n  \"command -V -- 'npm'\") printf 'npm is an alias for {} --wrapped\\n' ;;\n  \"command -v -- '{}'\"|\"command -V -- '{}'\" ) printf '{}\\n' ;;\n  *) exit 1 ;;\nesac\n",
@@ -625,28 +633,13 @@ mod tests {
                 real_path.display(),
                 real_path.display(),
                 real_path.display()
-            ),
-        )
-        .expect("write shell");
-        let mut shell_perms = std::fs::metadata(&shell_path)
-            .expect("metadata")
-            .permissions();
-        shell_perms.set_mode(0o755);
-        std::fs::set_permissions(&shell_path, shell_perms).expect("chmod shell");
+            )
+            .as_bytes(),
+        );
 
-        std::fs::write(&shim_path, b"#!/bin/sh\n").expect("write shim");
-        let mut shim_perms = std::fs::metadata(&shim_path)
-            .expect("metadata")
-            .permissions();
-        shim_perms.set_mode(0o755);
-        std::fs::set_permissions(&shim_path, shim_perms).expect("chmod shim");
+        write_executable(&shim_path, b"#!/bin/sh\n");
 
-        std::fs::write(&real_path, b"#!/bin/sh\n").expect("write real");
-        let mut real_perms = std::fs::metadata(&real_path)
-            .expect("metadata")
-            .permissions();
-        real_perms.set_mode(0o755);
-        std::fs::set_permissions(&real_path, real_perms).expect("chmod real");
+        write_executable(&real_path, b"#!/bin/sh\n");
 
         env::set_var("PATH", dir.path());
 
@@ -674,6 +667,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn path_lookup_ignores_non_executable_files() {
+        let _env_guard = ENV_LOCK.lock().expect("env lock");
         let dir = TempDir::new().expect("temp dir");
         let path = dir.path().join("npm");
         let original_path = env::var_os("PATH");
