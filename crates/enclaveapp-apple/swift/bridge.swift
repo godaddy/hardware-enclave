@@ -70,6 +70,41 @@ let SE_ERR_KEYCHAIN_NO_WINDOW_SERVER: Int32 = 15
 /// NOT evict the LAContext cache for this label.
 let SE_ERR_USER_CANCEL: Int32 = 16
 
+// MARK: - Thread-local last error detail
+
+private var _lastError: String = ""
+private let _lastErrorLock = NSLock()
+
+func setLastError(_ msg: String) {
+    _lastErrorLock.lock()
+    _lastError = msg
+    _lastErrorLock.unlock()
+}
+
+func clearLastError() {
+    _lastErrorLock.lock()
+    _lastError = ""
+    _lastErrorLock.unlock()
+}
+
+@_cdecl("enclaveapp_se_last_error")
+public func enclaveapp_se_last_error(
+    _ buf: UnsafeMutablePointer<UInt8>,
+    _ buf_len: UnsafeMutablePointer<Int32>
+) -> Int32 {
+    _lastErrorLock.lock()
+    let msg = _lastError
+    _lastErrorLock.unlock()
+    let data = Data(msg.utf8)
+    if buf_len.pointee < Int32(data.count) {
+        buf_len.pointee = Int32(data.count)
+        return SE_ERR_BUFFER_TOO_SMALL
+    }
+    data.copyBytes(to: buf, count: data.count)
+    buf_len.pointee = Int32(data.count)
+    return SE_OK
+}
+
 // MARK: - ECIES format constants
 
 let ECIES_VERSION: UInt8 = 0x01
@@ -232,11 +267,19 @@ func makeAccessControl(_ authPolicy: Int32) -> SecAccessControl? {
     case 1: flags.insert(.userPresence)
     case 2: flags.insert(.biometryAny)
     case 3: flags.insert(.devicePasscode)
-    default: return nil
+    default:
+        setLastError("unsupported auth_policy value \(authPolicy)")
+        return nil
     }
-    return SecAccessControlCreateWithFlags(
-        nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, flags, nil
+    var error: Unmanaged<CFError>?
+    let ac = SecAccessControlCreateWithFlags(
+        nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, flags, &error
     )
+    if ac == nil {
+        let desc = error.map { $0.takeRetainedValue().localizedDescription } ?? "unknown"
+        setLastError("SecAccessControlCreateWithFlags failed: \(desc)")
+    }
+    return ac
 }
 
 // MARK: - Helper: copy uncompressed public key
@@ -340,6 +383,7 @@ public func enclaveapp_se_generate_signing_key(
 
             return copyDataRep(key.dataRepresentation, data_rep_out, data_rep_len)
         } catch {
+            setLastError("key generation failed: \(error.localizedDescription)")
             return SE_ERR_GENERATE
         }
     }
@@ -359,6 +403,7 @@ public func enclaveapp_se_signing_public_key(
             let key = try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: data)
             return copyUncompressedPubKey(key.publicKey.rawRepresentation, pub_key_out, pub_key_len)
         } catch {
+            setLastError("key load failed: \(error.localizedDescription)")
             return SE_ERR_LOAD
         }
     }
@@ -437,6 +482,7 @@ public func enclaveapp_se_sign(
                     "enclaveapp: se_sign: \(nsErr.domain) \(nsErr.code): \(nsErr.localizedDescription)\n"
                 ).utf8))
             }
+            setLastError("sign failed: \(nsErr.domain) \(nsErr.code): \(nsErr.localizedDescription)")
             return SE_ERR_SIGN
         }
     }
@@ -474,6 +520,7 @@ public func enclaveapp_se_generate_encryption_key(
 
         return copyDataRep(key.dataRepresentation, data_rep_out, data_rep_len)
     } catch {
+        setLastError("key generation failed: \(error.localizedDescription)")
         return SE_ERR_GENERATE
     }
 }
@@ -491,6 +538,7 @@ public func enclaveapp_se_encryption_public_key(
         let key = try SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation: data)
         return copyUncompressedPubKey(key.publicKey.rawRepresentation, pub_key_out, pub_key_len)
     } catch {
+        setLastError("key load failed: \(error.localizedDescription)")
         return SE_ERR_LOAD
     }
 }
@@ -575,6 +623,7 @@ public func enclaveapp_se_encrypt(
 
         return SE_OK
     } catch {
+        setLastError("encrypt failed: \(error.localizedDescription)")
         return SE_ERR_ENCRYPT
     }
 }
@@ -656,6 +705,7 @@ public func enclaveapp_se_decrypt(
 
         return SE_OK
     } catch {
+        setLastError("decrypt failed: \(error.localizedDescription)")
         return SE_ERR_DECRYPT
     }
 }

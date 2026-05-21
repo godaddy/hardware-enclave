@@ -71,6 +71,8 @@ extern "C" {
         pub_key_len: *mut i32,
     ) -> i32;
 
+    pub fn enclaveapp_se_last_error(buf: *mut u8, buf_len: *mut i32) -> i32;
+
     pub fn enclaveapp_se_delete_key(data_rep: *const u8, data_rep_len: i32) -> i32;
 
     pub fn enclaveapp_se_encrypt(

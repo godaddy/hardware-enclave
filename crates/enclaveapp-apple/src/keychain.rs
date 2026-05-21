@@ -14,6 +14,19 @@ use zeroize::Zeroizing;
 
 const SE_ERR_BUFFER_TOO_SMALL: i32 = 4;
 
+#[allow(unsafe_code)]
+pub(crate) fn last_bridge_error() -> Option<String> {
+    let mut buf = vec![0_u8; 1024];
+    let mut buf_len: i32 = buf.len() as i32;
+    let rc = unsafe { ffi::enclaveapp_se_last_error(buf.as_mut_ptr(), &mut buf_len) };
+    if rc != 0 || buf_len <= 0 {
+        return None;
+    }
+    let len = buf_len as usize;
+    buf.truncate(len);
+    String::from_utf8(buf).ok().filter(|s| !s.is_empty())
+}
+
 /// Configuration for keychain operations, scoped to an application.
 #[derive(Debug)]
 pub struct KeychainConfig {
@@ -195,9 +208,11 @@ where
         }
 
         if rc != 0 {
-            return Err(Error::GenerateFailed {
-                detail: format!("FFI returned error code {rc}"),
-            });
+            let detail = match last_bridge_error() {
+                Some(msg) => format!("FFI returned error code {rc}: {msg}"),
+                None => format!("FFI returned error code {rc}"),
+            };
+            return Err(Error::GenerateFailed { detail });
         }
 
         // Contract sanity: pub_key buffer is fixed at 65 bytes.
@@ -552,9 +567,13 @@ pub fn public_key_from_data_rep(key_type: KeyType, data_rep: &[u8]) -> Result<Ve
     };
 
     if rc != 0 {
+        let detail = match last_bridge_error() {
+            Some(msg) => format!("FFI returned error code {rc}: {msg}"),
+            None => format!("FFI returned error code {rc}"),
+        };
         return Err(Error::KeyOperation {
             operation: "public_key".into(),
-            detail: format!("FFI returned error code {rc}"),
+            detail,
         });
     }
 
@@ -891,9 +910,13 @@ fn delete_key_from_data_rep(data_rep: &[u8]) -> Result<()> {
     if rc == 0 {
         Ok(())
     } else {
+        let detail = match last_bridge_error() {
+            Some(msg) => format!("FFI returned error code {rc}: {msg}"),
+            None => format!("FFI returned error code {rc}"),
+        };
         Err(Error::KeyOperation {
             operation: "delete_key".into(),
-            detail: format!("FFI returned error code {rc}"),
+            detail,
         })
     }
 }

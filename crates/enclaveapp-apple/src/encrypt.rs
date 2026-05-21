@@ -118,9 +118,11 @@ impl EnclaveEncryptor for SecureEnclaveEncryptor {
         };
 
         if rc != 0 {
-            return Err(Error::EncryptFailed {
-                detail: format!("FFI returned error code {rc}"),
-            });
+            let detail = match keychain::last_bridge_error() {
+                Some(msg) => format!("FFI returned error code {rc}: {msg}"),
+                None => format!("FFI returned error code {rc}"),
+            };
+            return Err(Error::EncryptFailed { detail });
         }
 
         ciphertext.truncate(ciphertext_len as usize);
@@ -155,9 +157,11 @@ impl EnclaveEncryptor for SecureEnclaveEncryptor {
         };
 
         if rc != 0 {
-            return Err(Error::DecryptFailed {
-                detail: format!("FFI returned error code {rc}"),
-            });
+            let detail = match keychain::last_bridge_error() {
+                Some(msg) => format!("FFI returned error code {rc}: {msg}"),
+                None => format!("FFI returned error code {rc}"),
+            };
+            return Err(Error::DecryptFailed { detail });
         }
 
         plaintext.truncate(plaintext_len as usize);
