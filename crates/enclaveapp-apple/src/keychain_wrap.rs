@@ -297,6 +297,12 @@ fn cache_evict(app_name: &str, label: &str) {
     crate::lacontext::evict(app_name, label);
 }
 
+/// Evict the cached wrapping key and LAContext for `label`, forcing the
+/// next operation to reload from the keychain with a fresh LAContext.
+pub fn cache_evict_for(app_name: &str, label: &str) {
+    cache_evict(app_name, label);
+}
+
 /// Store a wrapping key in the login keychain. Replaces any existing
 /// entry for the same service+account pair.
 ///
@@ -456,14 +462,14 @@ pub(crate) fn keychain_load(
         }),
         14 => Err(Error::KeychainInteractionRequired {
             // SE_ERR_KEYCHAIN_INTERACTION_REQUIRED: macOS returned
-            // errSecInteractionRequired (-25308) and the process has a CG
+            // errSecInteractionNotAllowed (-25308) and the process has a CG
             // session — screen is locked or biometric was cancelled.
             // Transient: retry after the user unlocks the screen.
             label: label.to_string(),
         }),
         15 => Err(Error::KeychainNoWindowServer {
             // SE_ERR_KEYCHAIN_NO_WINDOW_SERVER: macOS returned
-            // errSecInteractionRequired (-25308) and CGSessionCopyCurrentDictionary()
+            // errSecInteractionNotAllowed (-25308) and CGSessionCopyCurrentDictionary()
             // returned nil — the process has no window server connection.
             // Touch ID UI cannot be displayed. Recovery: restart the agent
             // via launchd so it inherits the user's GUI session.

@@ -226,4 +226,8 @@ impl EnclaveSigner for SecureEnclaveSigner {
             }
         }
     }
+
+    fn evict_wrapping_key_cache(&self, label: &str) {
+        crate::keychain_wrap::cache_evict_for(&self.config.app_name, label);
+    }
 }

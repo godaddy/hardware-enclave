@@ -101,6 +101,10 @@ pub trait EnclaveSigner: EnclaveKeyManager {
         let _ = (mode, cache_ttl_secs, reason);
         self.sign(label, data)
     }
+
+    /// Evict cached wrapping key and LAContext for `label`, forcing the next
+    /// operation to reload from the keychain with fresh authentication.
+    fn evict_wrapping_key_cache(&self, _label: &str) {}
 }
 
 /// ECIES encryption operations. Used by awsenc and sso-jwt for credential caching.

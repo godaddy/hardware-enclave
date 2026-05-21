@@ -49,16 +49,16 @@ let SE_ERR_KEYCHAIN_NOT_FOUND: Int32 = 12
 /// ("open Keychain Access and change Deny → Always Allow") rather than
 /// the generic "keychain load error".
 let SE_ERR_KEYCHAIN_AUTH_DENIED: Int32 = 13
-/// Returned when `SecItemCopyMatching` returns `errSecInteractionRequired`
-/// (-25308) — the item requires user presence but no authenticated LAContext
-/// was provided.  This happens when `lacontext_token=0` is passed and the
-/// keychain item was stored with `.userPresence` access control.  The screen
-/// may be locked or biometric auth was cancelled; the caller should retry
-/// after the user unlocks the screen.
+/// Returned when `SecItemCopyMatching` returns `errSecInteractionNotAllowed`
+/// (-25308) or `errSecInteractionRequired` (-25315) — the item requires user
+/// presence but no authenticated LAContext was provided.  This happens when
+/// `lacontext_token=0` is passed and the keychain item was stored with
+/// `.userPresence` access control.  The screen may be locked or biometric auth
+/// was cancelled; the caller should retry after the user unlocks the screen.
 let SE_ERR_KEYCHAIN_INTERACTION_REQUIRED: Int32 = 14
-/// Returned when `SecItemCopyMatching` returns `errSecInteractionRequired`
-/// and `CGSessionCopyCurrentDictionary()` returns nil — meaning the process
-/// has no window server session at all.  Touch ID requires a window server
+/// Returned when `SecItemCopyMatching` returns `errSecInteractionNotAllowed`
+/// or `errSecInteractionRequired` and `CGSessionCopyCurrentDictionary()`
+/// returns nil — meaning the process has no window server session at all.  Touch ID requires a window server
 /// connection to display its prompt; background processes started outside of
 /// launchd (e.g. `sshenc-agent &` in a shell) never get one.  Recovery:
 /// restart the agent via launchd so it inherits the user's GUI session.
@@ -1142,7 +1142,7 @@ public func enclaveapp_keychain_load(
         if status == errSecAuthFailed {
             return SE_ERR_KEYCHAIN_AUTH_DENIED
         }
-        if status == errSecInteractionRequired {
+        if status == errSecInteractionNotAllowed || status == errSecInteractionRequired {
             // Distinguish "no window server" (agent started outside launchd)
             // from "screen locked" (agent is fine, user needs to unlock).
             // CGSessionCopyCurrentDictionary() returns nil when the process

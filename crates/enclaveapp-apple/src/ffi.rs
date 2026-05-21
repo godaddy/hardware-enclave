@@ -100,9 +100,13 @@ extern "C" {
     //   0   SE_OK
     //   4   SE_ERR_BUFFER_TOO_SMALL
     //   9   SE_ERR_KEYCHAIN_STORE
-    //   10  SE_ERR_KEYCHAIN_LOAD
+    //   10  SE_ERR_KEYCHAIN_LOAD (generic load failure)
     //   11  SE_ERR_KEYCHAIN_DELETE
     //   12  SE_ERR_KEYCHAIN_NOT_FOUND
+    //   13  SE_ERR_KEYCHAIN_AUTH_DENIED (errSecAuthFailed -25293)
+    //   14  SE_ERR_KEYCHAIN_INTERACTION_REQUIRED (errSecInteractionNotAllowed -25308, has CG session)
+    //   15  SE_ERR_KEYCHAIN_NO_WINDOW_SERVER (errSecInteractionNotAllowed -25308, no CG session)
+    //   16  SE_ERR_USER_CANCEL (errSecUserCanceled -128)
     // `access_group` (UTF-8 pointer) + `access_group_len`: when
     // non-null with len > 0, the bridge routes SecItemAdd through the
     // Data Protection keychain with `kSecAttrAccessGroup` set —
