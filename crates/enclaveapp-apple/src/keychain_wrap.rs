@@ -548,6 +548,12 @@ pub fn generate_and_wrap(
 /// Returns `Ok(None)` if no wrapping-key entry exists — the caller can
 /// distinguish that from a decrypt/IO error.
 ///
+/// When `use_user_presence` is `Some(bool)` and the wrapping key was
+/// freshly loaded from the keychain (not served from the in-process
+/// cache), the item is re-stored to migrate it to the current data
+/// protection class (`AfterFirstUnlockThisDeviceOnly`). This is a
+/// one-time transparent upgrade for items created before the fix.
+///
 /// Raw wrapping-key bytes are fetched, used, and dropped inside this
 /// function — they do not escape `keychain_wrap`.
 pub fn decrypt_with_cached_key(
@@ -557,9 +563,24 @@ pub fn decrypt_with_cached_key(
     cache_ttl: Duration,
     access_group: Option<&str>,
     lacontext_token: u64,
+    use_user_presence: Option<bool>,
 ) -> Result<Option<Vec<u8>>> {
+    let was_cached = cache_lookup(app_name, label, cache_ttl).is_some();
     match keychain_load(app_name, label, cache_ttl, access_group, lacontext_token)? {
         Some(wrapping_key) => {
+            if !was_cached {
+                if let Some(up) = use_user_presence {
+                    if let Err(e) = keychain_store(app_name, label, &wrapping_key, up, access_group)
+                    {
+                        tracing::warn!(
+                            label = label,
+                            error = %e,
+                            "protection-class migration re-store failed; \
+                             item retains old protection class until next successful load"
+                        );
+                    }
+                }
+            }
             let plaintext = decrypt_blob(&wrapping_key, blob)?;
             Ok(Some(plaintext))
         }

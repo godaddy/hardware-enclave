@@ -71,6 +71,11 @@ let SE_ERR_KEYCHAIN_NO_WINDOW_SERVER: Int32 = 15
 let SE_ERR_USER_CANCEL: Int32 = 16
 
 // MARK: - Thread-local last error detail
+//
+// Captures the underlying error message (e.g. CryptoKit exception,
+// SecAccessControlCreateWithFlags failure) so the Rust side can include
+// it in diagnostics. Set by any function that returns a non-zero code;
+// cleared on success. Read via enclaveapp_se_last_error().
 
 private var _lastError: String = ""
 private let _lastErrorLock = NSLock()
@@ -273,7 +278,7 @@ func makeAccessControl(_ authPolicy: Int32) -> SecAccessControl? {
     }
     var error: Unmanaged<CFError>?
     let ac = SecAccessControlCreateWithFlags(
-        nil, kSecAttrAccessibleWhenUnlockedThisDeviceOnly, flags, &error
+        nil, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly, flags, &error
     )
     if ac == nil {
         let desc = error.map { $0.takeRetainedValue().localizedDescription } ?? "unknown"
@@ -722,9 +727,11 @@ public func enclaveapp_se_decrypt(
 // errSecMissingEntitlement (-34018). The legacy keychain accepts
 // unsigned callers.
 //
-// Items are created with `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`:
-// the device must be unlocked to read them, and they do NOT sync via
-// iCloud / migrate across devices.
+// Items are created with `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`:
+// available from first unlock until reboot, and they do NOT sync via
+// iCloud / migrate across devices. The AfterFirstUnlock class keeps the
+// class key in memory across sleep/wake cycles so background agents can
+// access wrapping keys without requiring the screen to be unlocked.
 
 /// Open the invoking user's login keychain by explicit path.
 ///
@@ -960,10 +967,17 @@ public func enclaveapp_keychain_store(
         // Bind access to user presence (Touch ID or device passcode)
         // via LocalAuthentication. `kSecAttrAccessControl` implies
         // accessibility, so `kSecAttrAccessible` must NOT also be set.
+        //
+        // AfterFirstUnlockThisDeviceOnly: the class key stays in memory
+        // from first unlock until reboot, so the wrapping key survives
+        // sleep/wake cycles. The .userPresence flag still requires
+        // Touch ID per-access. WhenUnlockedThisDeviceOnly would purge
+        // the class key on lock/sleep, making the wrapping key
+        // inaccessible to a background agent after sleep/wake.
         var acError: Unmanaged<CFError>?
         guard let ac = SecAccessControlCreateWithFlags(
             nil,
-            kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
             .userPresence,
             &acError
         ) else {
@@ -972,7 +986,7 @@ public func enclaveapp_keychain_store(
         }
         addQuery[kSecAttrAccessControl as String] = ac
     } else {
-        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
     }
     if let kc = kc { addQuery[kSecUseKeychain as String] = kc }
     var status = SecItemAdd(addQuery as CFDictionary, nil)
@@ -1008,7 +1022,7 @@ public func enclaveapp_keychain_store(
             // Userpresence on legacy keychain is errSecParam → flatten now
             addQuery.removeValue(forKey: kSecAttrAccessControl as String)
             addQuery[kSecAttrAccessible as String] =
-                kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+                kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         }
         // The DP-keychain initial path runs with `useExplicit = false`,
         // so we never opened a SecKeychain handle. If the default
@@ -1059,7 +1073,7 @@ public func enclaveapp_keychain_store(
         ).utf8))
         addQuery.removeValue(forKey: kSecAttrAccessControl as String)
         addQuery[kSecAttrAccessible as String] =
-            kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         status = SecItemAdd(addQuery as CFDictionary, nil)
         keychainTrace(
             "op=store_add_fallback service=\(serviceStr) account=\(accountStr) status=\(status)"

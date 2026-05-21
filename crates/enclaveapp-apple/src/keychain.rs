@@ -786,6 +786,7 @@ pub fn load_handle_with_context(
         config.wrapping_key_cache_ttl,
         config.keychain_access_group.as_deref(),
         lacontext_token,
+        Some(config.wrapping_key_user_presence),
     )? {
         Some(plaintext) => Ok(Zeroizing::new(plaintext)),
         None => Err(Error::KeyOperation {
