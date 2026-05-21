@@ -121,9 +121,13 @@ impl SecureEnclaveSigner {
                     // The LAContext is still valid; don't evict it.
                     label: label.to_string(),
                 },
-                _ => Error::SignFailed {
-                    detail: format!("FFI returned error code {rc}"),
-                },
+                _ => {
+                    let detail = match keychain::last_bridge_error() {
+                        Some(msg) => format!("FFI returned error code {rc}: {msg}"),
+                        None => format!("FFI returned error code {rc}"),
+                    };
+                    Error::SignFailed { detail }
+                }
             });
         }
 
