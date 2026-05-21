@@ -1,0 +1,26 @@
+sequenceDiagram
+    autonumber
+    participant App as Consuming app
+    participant Signing as AppSigningBackend
+    participant Backend as Selected signer backend
+    participant HSM as Secure Enclave / TPM / software fallback
+    participant Metadata as key metadata and cached public key
+    participant Target as Target protocol\nSSH agent / git signing / helper
+
+    App->>Signing: create signing backend(StorageConfig)
+    Signing->>Backend: ensure signing key exists
+    Backend->>HSM: create or load P-256 signing key
+    Backend->>Metadata: save/load .meta and .pub artifacts
+    Backend-->>Signing: signer ready
+
+    Target->>App: signing request
+    App->>Signing: sign(label, message)
+    Signing->>Backend: sign with requested AccessPolicy
+    Backend->>HSM: ECDSA P-256 SHA-256 signing operation
+    HSM-->>Backend: signature
+    Backend-->>Signing: DER signature
+    Signing-->>App: signature
+    App-->>Target: protocol-specific response
+
+    Note over Backend,HSM: Hardware-backed paths keep the private key non-exportable.
+

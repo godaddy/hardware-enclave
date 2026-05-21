@@ -1,0 +1,47 @@
+flowchart TB
+    subgraph appdisk["App-owned config/cache directory"]
+        meta["<label>.meta\nJSON metadata"]
+        pub["<label>.pub\ncached public key"]
+        handle["<label>.handle\nmacOS Secure Enclave handle blob"]
+        cache["app cache blobs\nciphertexts, timestamps, flags"]
+    end
+
+    subgraph core["enclaveapp-core"]
+        metadata["metadata helpers\nload/save/list/delete/rename"]
+        validation["validation\nlabels, P-256 points, access policy types"]
+        hardening["process hardening\nno core dumps, dumpability controls,\nWindows mitigations"]
+    end
+
+    subgraph trust["Platform trust anchors"]
+        se["macOS Secure Enclave\nprivate operation"]
+        keychain["macOS Keychain\nhandle wrapping / HMAC anchors"]
+        tpm["Windows/Linux TPM\nnon-exportable keys"]
+        secretservice["Linux Secret Service\nsoftware fallback key protection"]
+        dpapi["Windows DPAPI\nmetadata/HMAC support where used"]
+    end
+
+    app["Consuming app"] --> hardening
+    app --> metadata
+    metadata --> meta
+    metadata --> pub
+    metadata --> handle
+    app --> cache
+
+    handle --> keychain
+    keychain --> se
+    meta -.authenticated where applicable.-> keychain
+    meta -.authenticated where applicable.-> dpapi
+    pub -.cached copy of public material.-> validation
+
+    cache --> se
+    cache --> tpm
+    cache --> secretservice
+
+    classDef disk fill:#fff3cd,stroke:#9a7400,stroke-width:1px;
+    classDef core fill:#e8f2ff,stroke:#406a9f,stroke-width:1px;
+    classDef trust fill:#eaf7ea,stroke:#2f7d32,stroke-width:1px;
+
+    class meta,pub,handle,cache disk;
+    class metadata,validation,hardening core;
+    class se,keychain,tpm,secretservice,dpapi trust;
+

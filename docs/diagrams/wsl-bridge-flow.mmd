@@ -1,0 +1,33 @@
+sequenceDiagram
+    autonumber
+    participant App as WSL consuming app
+    participant Storage as enclaveapp-app-storage
+    participant Client as enclaveapp-bridge client
+    participant Bridge as Windows bridge executable
+    participant WinBackend as enclaveapp-windows
+    participant TPM as Windows TPM / CNG
+
+    App->>Storage: create storage/signing backend
+    Storage->>Storage: detect WSL
+    Storage->>Client: find_bridge(app_name)
+    Client-->>Storage: bridge path or none
+    Storage->>Client: init/app operation request
+    Client->>Bridge: single-line JSON-RPC over stdio
+    Bridge->>WinBackend: initialize TPM-backed backend
+    WinBackend->>TPM: create/load non-exportable key
+
+    alt encrypt/decrypt
+        Bridge->>WinBackend: encrypt or decrypt
+        WinBackend->>TPM: ECDH private-key operation
+    else signing / WebAuthn-style operations
+        Bridge->>WinBackend: sign or assertion operation
+        WinBackend->>TPM: signing operation
+    end
+
+    WinBackend-->>Bridge: result bytes
+    Bridge-->>Client: JSON-RPC result
+    Client-->>Storage: decoded result
+    Storage-->>App: application-facing result
+
+    Note over App,TPM: WSL never directly accesses Windows TPM key material.
+

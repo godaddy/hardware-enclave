@@ -1,0 +1,35 @@
+flowchart LR
+    app["Thin consuming app\nAppSpec + domain logic"]
+    adapter["enclaveapp-app-adapter\nprepare_launch"]
+    storage["enclaveapp-app-storage\nsecure secret storage"]
+
+    app --> adapter
+    adapter --> storage
+
+    subgraph types["Integration strategies"]
+        type1["Type 1: HelperTool\nTarget calls back via helper/plugin/agent\nStrongest guardrail"]
+        type2["Type 2: EnvInterpolation\nConfig contains ${ENV_VAR}; launcher injects env\nStrong guardrail"]
+        type3["Type 3: TempMaterializedConfig\nSecret written to restricted temp config\nModerate guardrail"]
+        type4["Type 4: CredentialSource\nSecure acquisition/cache only\nNo delivery guardrail"]
+    end
+
+    adapter --> type1
+    adapter --> type2
+    adapter --> type3
+    app --> type4
+
+    type1 --> target1["Target app protocol\ncredential_process / SSH agent / helper"]
+    type2 --> launcher["execve launcher\nmlock + zeroize env overrides\nchild core dumps disabled"]
+    type3 --> temp["TempConfig\nrestricted file, lifecycle cleanup"]
+    type4 --> consumer["External consumer decides\nwhere secret goes next"]
+
+    classDef strong fill:#eaf7ea,stroke:#2f7d32,stroke-width:1px;
+    classDef moderate fill:#fff3cd,stroke:#9a7400,stroke-width:1px;
+    classDef weak fill:#f8e8e8,stroke:#9f4040,stroke-width:1px;
+    classDef shared fill:#e8f2ff,stroke:#406a9f,stroke-width:1px;
+
+    class type1,type2,target1,launcher strong;
+    class type3,temp moderate;
+    class type4,consumer weak;
+    class app,adapter,storage shared;
+

@@ -1,0 +1,33 @@
+sequenceDiagram
+    autonumber
+    participant App as Consuming app
+    participant Storage as AppEncryptionStorage
+    participant Core as enclaveapp-core traits/types
+    participant Backend as Selected backend
+    participant HSM as Secure Enclave / TPM / keyring
+    participant Disk as App cache file
+
+    App->>Storage: create_encryption_storage(StorageConfig)
+    Storage->>Storage: detect platform and initialize backend
+    Storage->>Backend: ensure encryption key exists
+    Backend->>HSM: create or load P-256 encryption key
+    Backend-->>Storage: public key / metadata ready
+
+    App->>Storage: encrypt(plaintext secret)
+    Storage->>Core: validate label and access policy
+    Storage->>Backend: encrypt(label, plaintext)
+    Backend->>HSM: use P-256 ECDH key agreement
+    Backend-->>Storage: ECIES ciphertext
+    Storage-->>App: ciphertext bytes
+    App->>Disk: write app-specific cache format
+
+    App->>Disk: read ciphertext
+    App->>Storage: decrypt(ciphertext)
+    Storage->>Backend: decrypt(label, ciphertext)
+    Backend->>HSM: private-key operation / unwrap
+    HSM-->>Backend: shared-secret operation result
+    Backend-->>Storage: plaintext
+    Storage-->>App: plaintext secret
+
+    Note over App,Disk: libenclaveapp does not define app domain semantics for cached payloads.
+
