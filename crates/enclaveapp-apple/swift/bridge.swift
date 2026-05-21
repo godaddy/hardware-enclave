@@ -63,6 +63,12 @@ let SE_ERR_KEYCHAIN_INTERACTION_REQUIRED: Int32 = 14
 /// launchd (e.g. `sshenc-agent &` in a shell) never get one.  Recovery:
 /// restart the agent via launchd so it inherits the user's GUI session.
 let SE_ERR_KEYCHAIN_NO_WINDOW_SERVER: Int32 = 15
+/// Returned when the user explicitly cancels a Touch ID / biometric prompt
+/// or when LocalAuthentication returns LAError.userCancel, .appCancel, or
+/// .systemCancel.  The LAContext (if any) is still valid; evicting it would
+/// force a fresh prompt on the next attempt with no gain.  The caller should
+/// NOT evict the LAContext cache for this label.
+let SE_ERR_USER_CANCEL: Int32 = 16
 
 // MARK: - ECIES format constants
 
@@ -407,6 +413,30 @@ public func enclaveapp_se_sign(
 
             return SE_OK
         } catch {
+            // Distinguish user-cancel from real errors so Rust doesn't
+            // evict the LAContext cache when the user simply cancelled
+            // the prompt. The LAContext is still valid — evicting it
+            // forces a fresh Touch ID prompt on the next sign.
+            let nsErr = error as NSError
+            if nsErr.domain == LAErrorDomain {
+                let laCode = nsErr.code
+                if laCode == LAError.userCancel.rawValue
+                    || laCode == LAError.appCancel.rawValue
+                    || laCode == LAError.systemCancel.rawValue
+                {
+                    FileHandle.standardError.write(Data((
+                        "enclaveapp: se_sign: user cancelled (LAError \(laCode))\n"
+                    ).utf8))
+                    return SE_ERR_USER_CANCEL
+                }
+                FileHandle.standardError.write(Data((
+                    "enclaveapp: se_sign: LAError \(laCode): \(nsErr.localizedDescription)\n"
+                ).utf8))
+            } else {
+                FileHandle.standardError.write(Data((
+                    "enclaveapp: se_sign: \(nsErr.domain) \(nsErr.code): \(nsErr.localizedDescription)\n"
+                ).utf8))
+            }
             return SE_ERR_SIGN
         }
     }
@@ -1072,7 +1102,20 @@ public func enclaveapp_keychain_load(
             }
             return SE_ERR_KEYCHAIN_INTERACTION_REQUIRED
         }
+        if status == errSecUserCanceled {
+            // User explicitly cancelled the keychain auth prompt. The
+            // LAContext (if any) is still valid; evicting it would force
+            // a fresh prompt on retry with no gain.
+            FileHandle.standardError.write(Data((
+                "enclaveapp: keychain_load: user cancelled (errSecUserCanceled)\n"
+            ).utf8))
+            return SE_ERR_USER_CANCEL
+        }
         if status != errSecSuccess {
+            FileHandle.standardError.write(Data((
+                "enclaveapp: keychain_load: SecItemCopyMatching failed: " +
+                "OSStatus \(status) service=\(serviceStr) account=\(accountStr)\n"
+            ).utf8))
             return SE_ERR_KEYCHAIN_LOAD
         }
         guard let data = item as? Data else {

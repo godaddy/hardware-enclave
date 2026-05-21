@@ -66,6 +66,13 @@ pub enum Error {
     )]
     KeychainNoWindowServer { label: String },
 
+    /// The user explicitly cancelled a Touch ID / biometric prompt.  The
+    /// LAContext (if any) is still valid and should NOT be evicted — evicting
+    /// it forces a fresh prompt on retry with no gain.  This is transient and
+    /// expected: the caller may retry the operation, which will re-prompt.
+    #[error("user cancelled authentication for '{label}'")]
+    UserCancelled { label: String },
+
     #[error("config error: {0}")]
     Config(String),
 
@@ -216,6 +223,19 @@ mod tests {
         assert!(
             msg.contains("launchctl") || msg.contains("launchd"),
             "message must include launchd remediation guidance"
+        );
+    }
+
+    #[test]
+    fn display_user_cancelled() {
+        let e = Error::UserCancelled {
+            label: "mykey".into(),
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("mykey"), "message must name the label");
+        assert!(
+            msg.contains("cancel") || msg.contains("cancelled"),
+            "message must mention cancellation"
         );
     }
 

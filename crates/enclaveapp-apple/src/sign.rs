@@ -25,11 +25,19 @@ fn should_evict_lacontext(e: &Error) -> bool {
     // - KeychainNoWindowServer: same as InteractionRequired — token was 0,
     //   nothing cached. The cause is the agent running outside launchd;
     //   evicting is a no-op and the fix is to restart via launchd.
+    //
+    // - UserCancelled: the user explicitly cancelled the Touch ID prompt.
+    //   The LAContext is still valid and authenticated; evicting it forces
+    //   a fresh Touch ID prompt on the next operation with no gain. The
+    //   user may have cancelled due to being away from keyboard, on a call,
+    //   etc. Keeping the LAContext alive allows the next operation to
+    //   succeed silently when they return (within the cache TTL window).
     !matches!(
         e,
         Error::KeychainAuthDenied { .. }
             | Error::KeychainInteractionRequired { .. }
             | Error::KeychainNoWindowServer { .. }
+            | Error::UserCancelled { .. }
     )
 }
 
@@ -107,8 +115,15 @@ impl SecureEnclaveSigner {
         };
 
         if rc != 0 {
-            return Err(Error::SignFailed {
-                detail: format!("FFI returned error code {rc}"),
+            return Err(match rc {
+                16 => Error::UserCancelled {
+                    // SE_ERR_USER_CANCEL: user cancelled the Touch ID prompt.
+                    // The LAContext is still valid; don't evict it.
+                    label: label.to_string(),
+                },
+                _ => Error::SignFailed {
+                    detail: format!("FFI returned error code {rc}"),
+                },
             });
         }
 

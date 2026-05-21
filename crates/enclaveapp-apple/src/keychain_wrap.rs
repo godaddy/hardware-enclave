@@ -469,6 +469,13 @@ pub(crate) fn keychain_load(
             // via launchd so it inherits the user's GUI session.
             label: label.to_string(),
         }),
+        16 => Err(Error::UserCancelled {
+            // SE_ERR_USER_CANCEL: user explicitly cancelled the Touch ID /
+            // biometric prompt, or LocalAuthentication returned LAError.userCancel,
+            // .appCancel, or .systemCancel. The LAContext (if any) is still
+            // valid — evicting it forces a fresh prompt on retry with no gain.
+            label: label.to_string(),
+        }),
         _ => Err(Error::KeyOperation {
             operation: "keychain_load".into(),
             detail: format!("Swift bridge returned error code {rc}"),
