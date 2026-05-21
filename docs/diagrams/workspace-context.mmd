@@ -1,0 +1,60 @@
+flowchart TB
+    subgraph apps["Consuming enclave apps"]
+        sshenc["sshenc\nType 1 helper / agent signing"]
+        awsenc["awsenc\ncredential_process + encrypted cache"]
+        ssojwt["sso-jwt\nencrypted JWT cache / credential source"]
+        npmenc["npmenc\nadapter-based env interpolation"]
+        other["Other thin enclave apps"]
+    end
+
+    subgraph shared["libenclaveapp workspace"]
+        adapter["enclaveapp-app-adapter\nbinding store, secret store,\nresolver, launcher, temp config"]
+        storage["enclaveapp-app-storage\napp-facing platform detection,\nkey bootstrap, encrypt/decrypt/sign"]
+        core["enclaveapp-core\ntraits, types, metadata,\nconfig, atomic IO, process hardening"]
+        cache["enclaveapp-cache\nshared binary cache format"]
+        build["enclaveapp-build-support\nWindows build resources"]
+        bridge["enclaveapp-bridge\nJSON-RPC protocol + WSL client"]
+        tpmbridge["enclaveapp-tpm-bridge\nshared bridge server"]
+    end
+
+    subgraph backends["Platform backends"]
+        apple["enclaveapp-apple\nmacOS Secure Enclave"]
+        windows["enclaveapp-windows\nWindows TPM / CNG"]
+        linuxtpm["enclaveapp-linux-tpm\nLinux TPM / tss-esapi"]
+        keyring["enclaveapp-keyring\nLinux keyring fallback"]
+        wsl["enclaveapp-wsl\nWSL detection and install helpers"]
+        test["test support / mock backends\nnot production-selected"]
+    end
+
+    sshenc --> storage
+    awsenc --> storage
+    ssojwt --> storage
+    npmenc --> adapter
+    other --> adapter
+    other --> storage
+
+    adapter --> storage
+    adapter --> core
+    adapter --> cache
+    storage --> core
+    storage --> bridge
+    bridge --> tpmbridge
+    tpmbridge --> storage
+
+    storage --> apple
+    storage --> windows
+    storage --> linuxtpm
+    storage --> keyring
+    storage --> wsl
+    storage -.tests.-> test
+
+    classDef app fill:#eaf7ea,stroke:#2f7d32,stroke-width:1px;
+    classDef shared fill:#e8f2ff,stroke:#406a9f,stroke-width:1px;
+    classDef platform fill:#fff3cd,stroke:#9a7400,stroke-width:1px;
+    classDef test fill:#f7f7f7,stroke:#777,stroke-width:1px;
+
+    class sshenc,awsenc,ssojwt,npmenc,other app;
+    class adapter,storage,core,cache,build,bridge,tpmbridge shared;
+    class apple,windows,linuxtpm,keyring,wsl platform;
+    class test test;
+

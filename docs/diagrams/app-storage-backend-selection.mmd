@@ -1,0 +1,41 @@
+flowchart TD
+    start(["Consumer creates StorageConfig"])
+    config["StorageConfig\napp_name, key_label, access_policy,\nkeys_dir, bridge paths"]
+    storage["enclaveapp-app-storage\nAppEncryptionStorage or AppSigningBackend"]
+
+    detect{"Runtime environment"}
+    mac["macOS Apple Silicon"]
+    win["Windows"]
+    wsl["WSL"]
+    linux_tpm{"Linux TPM available?"}
+    linux_tpm_backend["enclaveapp-linux-tpm\nTPM 2.0 backend"]
+    keyring_backend["enclaveapp-keyring\nD-Bus Secret Service / keyring fallback"]
+    bridge["enclaveapp-bridge\nWindows host bridge"]
+    apple["enclaveapp-apple\nSecure Enclave via CryptoKit bridge"]
+    windows["enclaveapp-windows\nTPM 2.0 via CNG"]
+
+    unavailable["Unsupported or unavailable backend\nreturn explicit error"]
+
+    start --> config --> storage --> detect
+    detect --> mac --> apple
+    detect --> win --> windows
+    detect --> wsl --> bridge
+    detect --> linux_tpm
+    linux_tpm -->|yes| linux_tpm_backend
+    linux_tpm -->|no| keyring_backend
+
+    mac -.missing Secure Enclave / unsupported arch.-> unavailable
+    win -.TPM unavailable.-> unavailable
+    keyring_backend -.keyring unavailable.-> unavailable
+    bridge -.host bridge missing or rejected.-> unavailable
+
+    classDef entry fill:#eaf7ea,stroke:#2f7d32,stroke-width:1px;
+    classDef decision fill:#f7f7f7,stroke:#777,stroke-width:1px;
+    classDef backend fill:#e8f2ff,stroke:#406a9f,stroke-width:1px;
+    classDef error fill:#f8e8e8,stroke:#9f4040,stroke-width:1px;
+
+    class start,config,storage entry;
+    class detect,linux_tpm decision;
+    class apple,windows,bridge,linux_tpm_backend,keyring_backend backend;
+    class unavailable error;
+
