@@ -10,9 +10,17 @@ use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+pub fn meta_warning_default() -> String {
+    "HMAC-verified — do not modify this file directly. Use CLI tools (e.g. sshenc identity)."
+        .to_string()
+}
+
 /// Metadata stored alongside a hardware-bound key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyMeta {
+    /// Tamper warning rendered at the top of the JSON.
+    #[serde(default = "meta_warning_default", rename = "_warning")]
+    pub warning: String,
     /// Key label (unique identifier within the app).
     pub label: String,
     /// Type of key (signing or encryption). Defaults to Signing for backward
@@ -40,6 +48,7 @@ impl KeyMeta {
             .as_secs()
             .to_string();
         KeyMeta {
+            warning: meta_warning_default(),
             label: label.to_string(),
             key_type,
             access_policy,
@@ -233,6 +242,15 @@ pub fn restrict_file_permissions(path: &Path) -> Result<()> {
 }
 
 /// Save key metadata to a JSON file.
+///
+/// # Meta-tag invariant
+///
+/// On platforms with meta-integrity tags (macOS, Windows, Linux),
+/// every call to `save_meta` MUST be followed by a meta-tag re-stamp.
+/// Callers that skip the re-stamp will break `ensure_meta_integrity`
+/// verification on the next load. The canonical way to guarantee this
+/// is to route meta mutations through the agent process, which stamps
+/// the tag atomically. See sshenc-agent's `SetIdentity` handler.
 pub fn save_meta(dir: &Path, label: &str, meta: &KeyMeta) -> Result<()> {
     crate::types::validate_label(label)?;
     let meta_path = dir.join(format!("{label}.meta"));
@@ -304,6 +322,7 @@ pub fn load_meta(dir: &Path, label: &str) -> Result<KeyMeta> {
     let meta_path = dir.join(format!("{label}.meta"));
     if !meta_path.exists() {
         return Ok(KeyMeta {
+            warning: meta_warning_default(),
             label: label.to_string(),
             key_type: crate::KeyType::Signing,
             access_policy: crate::AccessPolicy::None,
