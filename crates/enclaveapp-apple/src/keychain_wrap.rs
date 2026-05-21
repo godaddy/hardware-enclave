@@ -303,19 +303,11 @@ pub fn cache_evict_for(app_name: &str, label: &str) {
     cache_evict(app_name, label);
 }
 
-/// Store a wrapping key in the login keychain. Replaces any existing
-/// entry for the same service+account pair.
-///
-/// When `use_user_presence` is `true` the item is stored with a
-/// `.userPresence` access-control flag so subsequent reads trigger a
-/// LocalAuthentication prompt (Touch ID or device passcode) instead of
-/// the legacy code-signature ACL dialog.
-///
-/// **Internal helper.** External callers get raw key access through
-/// [`generate_and_wrap`] (generate path) and [`relabel_wrapping_key`]
-/// (rename path). No public API hands out raw wrapping-key bytes.
+/// Write a wrapping key to the login keychain via the Swift bridge.
+/// Does NOT touch any process-local caches — callers decide whether
+/// to evict. Returns `Ok(())` on success.
 #[allow(unsafe_code)]
-pub(crate) fn keychain_store(
+fn keychain_store_ffi(
     app_name: &str,
     label: &str,
     wrapping_key: &[u8; WRAP_KEY_LEN],
@@ -365,8 +357,6 @@ pub(crate) fn keychain_store(
         )
     };
     if rc == 0 {
-        // Overwriting an item — any cached copy is stale.
-        cache_evict(app_name, label);
         Ok(())
     } else {
         Err(Error::KeyOperation {
@@ -374,6 +364,36 @@ pub(crate) fn keychain_store(
             detail: format!("Swift bridge returned error code {rc}"),
         })
     }
+}
+
+/// Store a wrapping key in the login keychain. Replaces any existing
+/// entry for the same service+account pair.
+///
+/// When `use_user_presence` is `true` the item is stored with a
+/// `.userPresence` access-control flag so subsequent reads trigger a
+/// LocalAuthentication prompt (Touch ID or device passcode) instead of
+/// the legacy code-signature ACL dialog.
+///
+/// **Internal helper.** External callers get raw key access through
+/// [`generate_and_wrap`] (generate path) and [`relabel_wrapping_key`]
+/// (rename path). No public API hands out raw wrapping-key bytes.
+pub(crate) fn keychain_store(
+    app_name: &str,
+    label: &str,
+    wrapping_key: &[u8; WRAP_KEY_LEN],
+    use_user_presence: bool,
+    access_group: Option<&str>,
+) -> Result<()> {
+    keychain_store_ffi(
+        app_name,
+        label,
+        wrapping_key,
+        use_user_presence,
+        access_group,
+    )?;
+    // Overwriting an item — any cached copy is stale.
+    cache_evict(app_name, label);
+    Ok(())
 }
 
 /// Load a wrapping key from the login keychain, consulting the
@@ -570,7 +590,14 @@ pub fn decrypt_with_cached_key(
         Some(wrapping_key) => {
             if !was_cached {
                 if let Some(up) = use_user_presence {
-                    if let Err(e) = keychain_store(app_name, label, &wrapping_key, up, access_group)
+                    // Re-store with the current protection class. Use
+                    // keychain_store_ffi (not keychain_store) to skip
+                    // cache eviction — the key bytes are unchanged, so
+                    // the entry keychain_load just cached is still valid,
+                    // and evicting the LAContext would force a redundant
+                    // Touch ID prompt on the next sign.
+                    if let Err(e) =
+                        keychain_store_ffi(app_name, label, &wrapping_key, up, access_group)
                     {
                         tracing::warn!(
                             label = label,
