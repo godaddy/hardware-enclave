@@ -24,22 +24,63 @@ pub struct FallbackDecision {
     pub reason: String,
 }
 
+/// Raw system information gathered during VM detection.
+/// Exposed for diagnostic/audit logging by consuming applications.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VmDiagnostics {
+    pub vm_detected: bool,
+    pub detection_reason: String,
+    /// Raw registry values read during detection (label, value or None if absent).
+    pub registry_values: Vec<(String, Option<String>)>,
+    /// CPUID hypervisor vendor string, if the hypervisor bit is set.
+    pub cpuid_hypervisor_vendor: Option<String>,
+    /// Whether the Hyper-V guest integration services registry key exists.
+    pub hyperv_guest_integration: bool,
+    /// Architecture of the running process.
+    pub arch: &'static str,
+}
+
 /// Return whether a failed TPM initialization may fall back to DPAPI.
 pub fn should_use_dpapi_after_tpm_failure(error: &str) -> FallbackDecision {
     let tpm_failure = is_tpm_unavailable_error(error);
-    let vm = detect_vm();
-    let allowed = tpm_failure && vm.detected;
-    let reason = match (allowed, tpm_failure, vm.detected) {
-        (true, _, _) => format!("TPM unavailable and VM detected: {}", vm.reason),
+    let diag = collect_vm_diagnostics();
+    let allowed = tpm_failure && diag.vm_detected;
+    let reason = match (allowed, tpm_failure, diag.vm_detected) {
+        (true, _, _) => format!("TPM unavailable and VM detected: {}", diag.detection_reason),
         (false, false, _) => "TPM failure did not look like missing/unusable TPM hardware".into(),
-        (false, true, false) => format!("TPM unavailable but VM not detected: {}", vm.reason),
+        (false, true, false) => {
+            format!(
+                "TPM unavailable but VM not detected: {}",
+                diag.detection_reason
+            )
+        }
         (false, true, true) => "fallback denied".into(),
     };
     FallbackDecision {
         allowed,
         tpm_failure,
-        vm_detected: vm.detected,
+        vm_detected: diag.vm_detected,
         reason,
+    }
+}
+
+/// Collect VM detection diagnostics without making a fallback decision.
+/// Returns raw system information for diagnostic logging by consuming applications.
+pub fn collect_vm_diagnostics() -> VmDiagnostics {
+    #[cfg(target_os = "windows")]
+    {
+        collect_vm_diagnostics_windows()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        VmDiagnostics {
+            vm_detected: false,
+            detection_reason: "non-Windows build".into(),
+            registry_values: vec![],
+            cpuid_hypervisor_vendor: None,
+            hyperv_guest_integration: false,
+            arch: std::env::consts::ARCH,
+        }
     }
 }
 
@@ -62,92 +103,205 @@ fn is_tpm_unavailable_error(error: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct VmDetection {
-    detected: bool,
-    reason: String,
-}
-
-fn detect_vm() -> VmDetection {
-    #[cfg(target_os = "windows")]
-    {
-        detect_vm_windows()
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        VmDetection {
-            detected: false,
-            reason: "non-Windows build".into(),
-        }
-    }
-}
-
 #[cfg(target_os = "windows")]
-fn detect_vm_windows() -> VmDetection {
-    let registry_values = [
-        registry_string(
+fn collect_vm_diagnostics_windows() -> VmDiagnostics {
+    let registry_checks: Vec<(&str, &str, &str)> = vec![
+        (
+            "SystemInformation\\SystemManufacturer",
             "SYSTEM\\CurrentControlSet\\Control\\SystemInformation",
             "SystemManufacturer",
         ),
-        registry_string(
+        (
+            "SystemInformation\\SystemProductName",
             "SYSTEM\\CurrentControlSet\\Control\\SystemInformation",
             "SystemProductName",
         ),
-        registry_string("HARDWARE\\DESCRIPTION\\System\\BIOS", "SystemManufacturer"),
-        registry_string("HARDWARE\\DESCRIPTION\\System\\BIOS", "SystemProductName"),
-        registry_string("HARDWARE\\DESCRIPTION\\System\\BIOS", "BIOSVendor"),
+        (
+            "BIOS\\SystemManufacturer",
+            "HARDWARE\\DESCRIPTION\\System\\BIOS",
+            "SystemManufacturer",
+        ),
+        (
+            "BIOS\\SystemProductName",
+            "HARDWARE\\DESCRIPTION\\System\\BIOS",
+            "SystemProductName",
+        ),
+        (
+            "BIOS\\BIOSVendor",
+            "HARDWARE\\DESCRIPTION\\System\\BIOS",
+            "BIOSVendor",
+        ),
+        (
+            "BIOS\\BIOSVersion",
+            "HARDWARE\\DESCRIPTION\\System\\BIOS",
+            "BIOSVersion",
+        ),
+        (
+            "BIOS\\SystemVersion",
+            "HARDWARE\\DESCRIPTION\\System\\BIOS",
+            "SystemVersion",
+        ),
+        (
+            "BIOS\\BaseBoardManufacturer",
+            "HARDWARE\\DESCRIPTION\\System\\BIOS",
+            "BaseBoardManufacturer",
+        ),
+        (
+            "BIOS\\BaseBoardProduct",
+            "HARDWARE\\DESCRIPTION\\System\\BIOS",
+            "BaseBoardProduct",
+        ),
+        (
+            "Disk\\Enum\\0",
+            "SYSTEM\\CurrentControlSet\\Services\\Disk\\Enum",
+            "0",
+        ),
+        (
+            "CentralProcessor\\ProcessorNameString",
+            "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
+            "ProcessorNameString",
+        ),
+        (
+            "CentralProcessor\\VendorIdentifier",
+            "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
+            "VendorIdentifier",
+        ),
     ];
-    let joined = registry_values
+
+    let registry_values: Vec<(String, Option<String>)> = registry_checks
         .iter()
-        .flatten()
-        .map(String::as_str)
+        .map(|(label, subkey, value_name)| (label.to_string(), registry_string(subkey, value_name)))
+        .collect();
+
+    let hyperv_guest = hyperv_guest_parameters_exist();
+
+    let cpuid_vendor = cpuid_hypervisor_vendor();
+
+    // Build the joined string from identity-relevant registry values for vm_string_signal.
+    // Use only the first 9 values (manufacturer/product/bios strings, not disk/processor).
+    let identity_joined = registry_values
+        .iter()
+        .take(9)
+        .filter_map(|(_, v)| v.as_deref())
         .collect::<Vec<_>>()
         .join(" | ");
-    if vm_string_signal(&joined) {
-        return VmDetection {
-            detected: true,
-            reason: format!("registry VM marker: {joined}"),
+
+    let disk_device = registry_values
+        .iter()
+        .find(|(label, _)| label == "Disk\\Enum\\0")
+        .and_then(|(_, v)| v.as_deref());
+
+    // --- Detection logic ---
+
+    // 1. Registry identity strings (manufacturer, product, BIOS, baseboard)
+    if vm_string_signal(&identity_joined) {
+        return VmDiagnostics {
+            vm_detected: true,
+            detection_reason: format!("registry VM marker: {identity_joined}"),
+            registry_values,
+            cpuid_hypervisor_vendor: cpuid_vendor,
+            hyperv_guest_integration: hyperv_guest,
+            arch: std::env::consts::ARCH,
         };
     }
 
-    if let Some(vendor) = cpuid_hypervisor_vendor() {
-        if vm_string_signal(&vendor) && !vendor.eq_ignore_ascii_case("Microsoft Hv") {
-            return VmDetection {
-                detected: true,
-                reason: format!("CPUID hypervisor vendor: {vendor}"),
+    // 2. Disk device name (virtual disk controllers)
+    if let Some(disk) = disk_device {
+        if vm_string_signal(disk) {
+            return VmDiagnostics {
+                vm_detected: true,
+                detection_reason: format!("virtual disk device: {disk}"),
+                registry_values,
+                cpuid_hypervisor_vendor: cpuid_vendor,
+                hyperv_guest_integration: hyperv_guest,
+                arch: std::env::consts::ARCH,
             };
         }
-        // "Microsoft Hv" is reported by both Windows VBS on physical hardware
-        // and Hyper-V guests (Azure, on-prem bastions, VDI).  Distinguish them
-        // by manufacturer: physical machines with VBS show their real OEM
-        // (Dell, Lenovo, HP, …); Hyper-V guests show "Microsoft Corporation".
-        // Note: Surface devices are Microsoft hardware but have working TPMs,
-        // so they never reach this fallback path.
-        if vendor.eq_ignore_ascii_case("Microsoft Hv")
-            && joined
+    }
+
+    // 3. CPUID hypervisor vendor
+    if let Some(ref vendor) = cpuid_vendor {
+        if vm_string_signal(vendor) && !vendor.eq_ignore_ascii_case("Microsoft Hv") {
+            return VmDiagnostics {
+                vm_detected: true,
+                detection_reason: format!("CPUID hypervisor vendor: {vendor}"),
+                registry_values,
+                cpuid_hypervisor_vendor: cpuid_vendor,
+                hyperv_guest_integration: hyperv_guest,
+                arch: std::env::consts::ARCH,
+            };
+        }
+        // "Microsoft Hv" — reported by both VBS on physical hardware and Hyper-V guests.
+        if vendor.eq_ignore_ascii_case("Microsoft Hv") {
+            // 4. Microsoft Hv + "Microsoft Corporation" manufacturer = Hyper-V guest
+            if identity_joined
                 .to_ascii_lowercase()
                 .contains("microsoft corporation")
-        {
-            return VmDetection {
-                detected: true,
-                reason: format!(
-                    "Hyper-V guest: Microsoft Hv CPUID + Microsoft Corporation manufacturer ({joined})"
+            {
+                return VmDiagnostics {
+                    vm_detected: true,
+                    detection_reason: format!(
+                        "Hyper-V guest: Microsoft Hv CPUID + Microsoft Corporation manufacturer ({identity_joined})"
+                    ),
+                    registry_values,
+                    cpuid_hypervisor_vendor: cpuid_vendor,
+                    hyperv_guest_integration: hyperv_guest,
+                    arch: std::env::consts::ARCH,
+                };
+            }
+            // 5. Microsoft Hv + Hyper-V guest integration services = VDI on Hyper-V
+            //    (catches CyberArk, Citrix, etc. with non-standard manufacturer)
+            if hyperv_guest {
+                return VmDiagnostics {
+                    vm_detected: true,
+                    detection_reason: format!(
+                        "Hyper-V VDI: Microsoft Hv CPUID + guest integration services present ({identity_joined})"
+                    ),
+                    registry_values,
+                    cpuid_hypervisor_vendor: cpuid_vendor,
+                    hyperv_guest_integration: hyperv_guest,
+                    arch: std::env::consts::ARCH,
+                };
+            }
+            return VmDiagnostics {
+                vm_detected: false,
+                detection_reason: format!(
+                    "hypervisor bit set without VM indicators: {vendor} (manufacturer: {identity_joined})"
                 ),
+                registry_values,
+                cpuid_hypervisor_vendor: cpuid_vendor,
+                hyperv_guest_integration: hyperv_guest,
+                arch: std::env::consts::ARCH,
             };
         }
-        return VmDetection {
-            detected: false,
-            reason: format!("hypervisor bit set without trusted VM registry marker: {vendor}"),
+    }
+
+    // 6. No CPUID hypervisor, but check Hyper-V guest integration (ARM64 path)
+    if hyperv_guest {
+        return VmDiagnostics {
+            vm_detected: true,
+            detection_reason: format!(
+                "Hyper-V guest integration services present without CPUID hypervisor ({identity_joined})"
+            ),
+            registry_values,
+            cpuid_hypervisor_vendor: cpuid_vendor,
+            hyperv_guest_integration: hyperv_guest,
+            arch: std::env::consts::ARCH,
         };
     }
 
-    VmDetection {
-        detected: false,
-        reason: if joined.is_empty() {
-            "no VM registry markers and no CPUID hypervisor vendor".into()
+    VmDiagnostics {
+        vm_detected: false,
+        detection_reason: if identity_joined.is_empty() {
+            "no VM registry markers, no CPUID hypervisor vendor, no Hyper-V guest integration"
+                .into()
         } else {
-            format!("no VM registry marker: {joined}")
+            format!("no VM indicators detected: {identity_joined}")
         },
+        registry_values,
+        cpuid_hypervisor_vendor: cpuid_vendor,
+        hyperv_guest_integration: hyperv_guest,
+        arch: std::env::consts::ARCH,
     }
 }
 
@@ -170,9 +324,44 @@ fn vm_string_signal(value: &str) -> bool {
         "nutanix",
         "citrix",
         "bhyve",
+        "cyberark",
+        "seabios",
+        "proxmox",
+        "openstack",
+        "oracle vm",
     ]
     .iter()
     .any(|needle| lower.contains(needle))
+}
+
+/// Check whether the Hyper-V guest integration services registry key exists.
+/// This key is present on all Hyper-V guests (Azure VMs, on-prem VDI, etc.)
+/// but NOT on physical machines running VBS.
+#[cfg(target_os = "windows")]
+fn hyperv_guest_parameters_exist() -> bool {
+    use windows::Win32::System::Registry::{RegCloseKey, RegOpenKeyExW, HKEY, KEY_READ};
+
+    let subkey = wide_null("SOFTWARE\\Microsoft\\Virtual Machine\\Guest\\Parameters");
+    let mut hkey = HKEY::default();
+    // SAFETY: Standard Win32 registry probe. We only open for read and
+    // immediately close. The wide_null string is kept alive for the call.
+    let status = unsafe {
+        RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            windows::core::PCWSTR(subkey.as_ptr()),
+            Some(0),
+            KEY_READ,
+            &mut hkey,
+        )
+    };
+    if status.is_ok() {
+        unsafe {
+            let _ = RegCloseKey(hkey);
+        }
+        true
+    } else {
+        false
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -313,5 +502,34 @@ mod tests {
         assert!(!vm_string_signal("Dell Inc. | Latitude 7450"));
         assert!(!vm_string_signal("LENOVO | ThinkPad X1 Carbon"));
         assert!(!vm_string_signal("HP | EliteBook 840"));
+    }
+
+    #[test]
+    fn vm_string_classifier_accepts_new_signals() {
+        assert!(vm_string_signal("CyberArk Ltd | CyberArk PSM"));
+        assert!(vm_string_signal("SeaBIOS | pc-q35-8.1"));
+        assert!(vm_string_signal("Proxmox Virtual Environment"));
+        assert!(vm_string_signal("OpenStack Foundation"));
+        assert!(vm_string_signal("Oracle VM VirtualBox"));
+    }
+
+    #[test]
+    fn vm_string_classifier_rejects_raid_virtual_disk() {
+        // RAID controllers expose "Virtual Disk" — must NOT match.
+        assert!(!vm_string_signal("DELL | VIRTUAL DISK"));
+        assert!(!vm_string_signal("HP SmartArray Virtual Disk"));
+    }
+
+    #[test]
+    fn vm_string_classifier_rejects_seagate() {
+        // "seabios" must not match "Seagate" (different prefix)
+        assert!(!vm_string_signal("Seagate Barracuda"));
+    }
+
+    #[test]
+    fn collect_vm_diagnostics_returns_valid_struct() {
+        let diag = collect_vm_diagnostics();
+        assert!(!diag.detection_reason.is_empty());
+        assert!(!diag.arch.is_empty());
     }
 }
