@@ -350,7 +350,7 @@ fn detect_guest_services() -> Vec<String> {
             RegOpenKeyExW(
                 HKEY_LOCAL_MACHINE,
                 windows::core::PCWSTR(subkey_wide.as_ptr()),
-                Some(0),
+                0,
                 KEY_READ,
                 &mut hkey,
             )
@@ -440,7 +440,7 @@ fn hyperv_guest_parameters_exist() -> bool {
         RegOpenKeyExW(
             HKEY_LOCAL_MACHINE,
             windows::core::PCWSTR(subkey.as_ptr()),
-            Some(0),
+            0,
             KEY_READ,
             &mut hkey,
         )
