@@ -36,6 +36,10 @@ pub struct VmDiagnostics {
     pub cpuid_hypervisor_vendor: Option<String>,
     /// Whether the Hyper-V guest integration services registry key exists.
     pub hyperv_guest_integration: bool,
+    /// VM guest services found in the Windows service registry.
+    pub guest_services_found: Vec<String>,
+    /// Display adapter description from the GPU class registry.
+    pub display_adapter: Option<String>,
     /// Architecture of the running process.
     pub arch: &'static str,
 }
@@ -79,6 +83,8 @@ pub fn collect_vm_diagnostics() -> VmDiagnostics {
             registry_values: vec![],
             cpuid_hypervisor_vendor: None,
             hyperv_guest_integration: false,
+            guest_services_found: vec![],
+            display_adapter: None,
             arch: std::env::consts::ARCH,
         }
     }
@@ -174,8 +180,9 @@ fn collect_vm_diagnostics_windows() -> VmDiagnostics {
         .collect();
 
     let hyperv_guest = hyperv_guest_parameters_exist();
-
     let cpuid_vendor = cpuid_hypervisor_vendor();
+    let guest_services = detect_guest_services();
+    let display_adapter = detect_display_adapter();
 
     // Build the joined string from identity-relevant registry values for vm_string_signal.
     // Use only the first 9 values (manufacturer/product/bios strings, not disk/processor).
@@ -191,118 +198,202 @@ fn collect_vm_diagnostics_windows() -> VmDiagnostics {
         .find(|(label, _)| label == "Disk\\Enum\\0")
         .and_then(|(_, v)| v.as_deref());
 
+    let make_result = |vm_detected: bool, detection_reason: String| VmDiagnostics {
+        vm_detected,
+        detection_reason,
+        registry_values: registry_values.clone(),
+        cpuid_hypervisor_vendor: cpuid_vendor.clone(),
+        hyperv_guest_integration: hyperv_guest,
+        guest_services_found: guest_services.clone(),
+        display_adapter: display_adapter.clone(),
+        arch: std::env::consts::ARCH,
+    };
+
     // --- Detection logic ---
 
     // 1. Registry identity strings (manufacturer, product, BIOS, baseboard)
     if vm_string_signal(&identity_joined) {
-        return VmDiagnostics {
-            vm_detected: true,
-            detection_reason: format!("registry VM marker: {identity_joined}"),
-            registry_values,
-            cpuid_hypervisor_vendor: cpuid_vendor,
-            hyperv_guest_integration: hyperv_guest,
-            arch: std::env::consts::ARCH,
-        };
+        return make_result(true, format!("registry VM marker: {identity_joined}"));
     }
 
     // 2. Disk device name (virtual disk controllers)
     if let Some(disk) = disk_device {
         if vm_string_signal(disk) {
-            return VmDiagnostics {
-                vm_detected: true,
-                detection_reason: format!("virtual disk device: {disk}"),
-                registry_values,
-                cpuid_hypervisor_vendor: cpuid_vendor,
-                hyperv_guest_integration: hyperv_guest,
-                arch: std::env::consts::ARCH,
-            };
+            return make_result(true, format!("virtual disk device: {disk}"));
         }
     }
 
-    // 3. CPUID hypervisor vendor
+    // 3. VM guest services present (vmicheartbeat, VBoxGuest, vmci, etc.)
+    if !guest_services.is_empty() {
+        let svc_list = guest_services.join(", ");
+        return make_result(true, format!("VM guest services installed: {svc_list}"));
+    }
+
+    // 4. Virtual display adapter
+    if let Some(ref adapter) = display_adapter {
+        if vm_display_signal(adapter) {
+            return make_result(true, format!("virtual display adapter: {adapter}"));
+        }
+    }
+
+    // 5. CPUID hypervisor vendor
     if let Some(ref vendor) = cpuid_vendor {
         if vm_string_signal(vendor) && !vendor.eq_ignore_ascii_case("Microsoft Hv") {
-            return VmDiagnostics {
-                vm_detected: true,
-                detection_reason: format!("CPUID hypervisor vendor: {vendor}"),
-                registry_values,
-                cpuid_hypervisor_vendor: cpuid_vendor,
-                hyperv_guest_integration: hyperv_guest,
-                arch: std::env::consts::ARCH,
-            };
+            return make_result(true, format!("CPUID hypervisor vendor: {vendor}"));
         }
         // "Microsoft Hv" — reported by both VBS on physical hardware and Hyper-V guests.
         if vendor.eq_ignore_ascii_case("Microsoft Hv") {
-            // 4. Microsoft Hv + "Microsoft Corporation" manufacturer = Hyper-V guest
+            // 6. Microsoft Hv + "Microsoft Corporation" manufacturer = Hyper-V guest
             if identity_joined
                 .to_ascii_lowercase()
                 .contains("microsoft corporation")
             {
-                return VmDiagnostics {
-                    vm_detected: true,
-                    detection_reason: format!(
+                return make_result(
+                    true,
+                    format!(
                         "Hyper-V guest: Microsoft Hv CPUID + Microsoft Corporation manufacturer ({identity_joined})"
                     ),
-                    registry_values,
-                    cpuid_hypervisor_vendor: cpuid_vendor,
-                    hyperv_guest_integration: hyperv_guest,
-                    arch: std::env::consts::ARCH,
-                };
+                );
             }
-            // 5. Microsoft Hv + Hyper-V guest integration services = VDI on Hyper-V
-            //    (catches CyberArk, Citrix, etc. with non-standard manufacturer)
+            // 7. Microsoft Hv + Hyper-V guest integration services = VDI on Hyper-V
             if hyperv_guest {
-                return VmDiagnostics {
-                    vm_detected: true,
-                    detection_reason: format!(
+                return make_result(
+                    true,
+                    format!(
                         "Hyper-V VDI: Microsoft Hv CPUID + guest integration services present ({identity_joined})"
                     ),
-                    registry_values,
-                    cpuid_hypervisor_vendor: cpuid_vendor,
-                    hyperv_guest_integration: hyperv_guest,
-                    arch: std::env::consts::ARCH,
-                };
+                );
             }
-            return VmDiagnostics {
-                vm_detected: false,
-                detection_reason: format!(
+            return make_result(
+                false,
+                format!(
                     "hypervisor bit set without VM indicators: {vendor} (manufacturer: {identity_joined})"
                 ),
-                registry_values,
-                cpuid_hypervisor_vendor: cpuid_vendor,
-                hyperv_guest_integration: hyperv_guest,
-                arch: std::env::consts::ARCH,
-            };
+            );
         }
     }
 
-    // 6. No CPUID hypervisor, but check Hyper-V guest integration (ARM64 path)
+    // 8. No CPUID hypervisor, but check Hyper-V guest integration (ARM64 path)
     if hyperv_guest {
-        return VmDiagnostics {
-            vm_detected: true,
-            detection_reason: format!(
+        return make_result(
+            true,
+            format!(
                 "Hyper-V guest integration services present without CPUID hypervisor ({identity_joined})"
             ),
-            registry_values,
-            cpuid_hypervisor_vendor: cpuid_vendor,
-            hyperv_guest_integration: hyperv_guest,
-            arch: std::env::consts::ARCH,
-        };
+        );
     }
 
-    VmDiagnostics {
-        vm_detected: false,
-        detection_reason: if identity_joined.is_empty() {
-            "no VM registry markers, no CPUID hypervisor vendor, no Hyper-V guest integration"
-                .into()
+    make_result(
+        false,
+        if identity_joined.is_empty() {
+            "no VM indicators detected (no registry markers, no CPUID hypervisor, no guest services, no virtual display)".into()
         } else {
             format!("no VM indicators detected: {identity_joined}")
         },
-        registry_values,
-        cpuid_hypervisor_vendor: cpuid_vendor,
-        hyperv_guest_integration: hyperv_guest,
-        arch: std::env::consts::ARCH,
+    )
+}
+
+/// Check for known VM guest service drivers in the Windows service registry.
+/// These services are only installed by hypervisor guest tools — never on bare metal.
+#[cfg(target_os = "windows")]
+fn detect_guest_services() -> Vec<String> {
+    use windows::Win32::System::Registry::{RegCloseKey, RegOpenKeyExW, HKEY, KEY_READ};
+
+    const VM_SERVICES: &[(&str, &str)] = &[
+        // Hyper-V guest integration
+        ("vmicheartbeat", "Hyper-V Heartbeat"),
+        ("vmicshutdown", "Hyper-V Shutdown"),
+        ("vmickvpexchange", "Hyper-V KVP Exchange"),
+        ("vmicguestinterface", "Hyper-V Guest Service Interface"),
+        ("vmicvss", "Hyper-V VSS"),
+        ("vmictimesync", "Hyper-V Time Sync"),
+        // VMware Tools
+        ("vmci", "VMware VMCI"),
+        ("vmhgfs", "VMware Host-Guest Filesystem"),
+        ("vmxnet", "VMware vmxnet"),
+        ("vmxnet3", "VMware vmxnet3"),
+        ("vmvss", "VMware VSS"),
+        ("VMTools", "VMware Tools"),
+        // VirtualBox Guest Additions
+        ("VBoxGuest", "VirtualBox Guest"),
+        ("VBoxSF", "VirtualBox Shared Folders"),
+        ("VBoxMouse", "VirtualBox Mouse"),
+        ("VBoxVideo", "VirtualBox Video"),
+        // KVM/virtio (Red Hat)
+        ("vioscsi", "virtio SCSI"),
+        ("viostor", "virtio Storage"),
+        ("netkvm", "virtio Network"),
+        ("vioinput", "virtio Input"),
+        ("vioser", "virtio Serial"),
+        ("balloon", "virtio Balloon"),
+        // QEMU Guest Agent
+        ("QEMU-GA", "QEMU Guest Agent"),
+        ("qemu-ga", "QEMU Guest Agent"),
+        // Parallels
+        ("prl_strg", "Parallels Storage"),
+        ("prl_tg", "Parallels Tools Gate"),
+        ("prl_eth", "Parallels Network"),
+        // Xen
+        ("xenevtchn", "Xen Event Channel"),
+        ("xenvbd", "Xen Block Device"),
+        ("xennet", "Xen Network"),
+        ("xenvif", "Xen Virtual Interface"),
+    ];
+
+    let mut found = Vec::new();
+    for (svc_name, label) in VM_SERVICES {
+        let subkey = format!("SYSTEM\\CurrentControlSet\\Services\\{svc_name}");
+        let subkey_wide = wide_null(&subkey);
+        let mut hkey = HKEY::default();
+        // SAFETY: Standard registry probe — open for read and immediately close.
+        let status = unsafe {
+            RegOpenKeyExW(
+                HKEY_LOCAL_MACHINE,
+                windows::core::PCWSTR(subkey_wide.as_ptr()),
+                Some(0),
+                KEY_READ,
+                &mut hkey,
+            )
+        };
+        if status.is_ok() {
+            unsafe {
+                let _ = RegCloseKey(hkey);
+            }
+            found.push(format!("{svc_name} ({label})"));
+        }
     }
+    found
+}
+
+/// Read the primary display adapter description from the GPU class registry.
+#[cfg(target_os = "windows")]
+fn detect_display_adapter() -> Option<String> {
+    // The display adapter class GUID is {4d36e968-e325-11ce-bfc1-08002be10318}.
+    // Subkey \0000 is the primary adapter.
+    registry_string(
+        "SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}\\0000",
+        "DriverDesc",
+    )
+}
+
+/// Check if a display adapter description indicates a virtual GPU.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn vm_display_signal(adapter: &str) -> bool {
+    let lower = adapter.to_ascii_lowercase();
+    [
+        "microsoft hyper-v video",
+        "vmware svga",
+        "vmware soda",
+        "virtualbox graphics",
+        "red hat qxl",
+        "virtio gpu",
+        "citrix indirect display",
+        "parallels display",
+        "qxl",
+        "xen display",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -524,6 +615,23 @@ mod tests {
     fn vm_string_classifier_rejects_seagate() {
         // "seabios" must not match "Seagate" (different prefix)
         assert!(!vm_string_signal("Seagate Barracuda"));
+    }
+
+    #[test]
+    fn vm_display_signal_detects_virtual_adapters() {
+        assert!(vm_display_signal("Microsoft Hyper-V Video"));
+        assert!(vm_display_signal("VMware SVGA 3D"));
+        assert!(vm_display_signal("VirtualBox Graphics Adapter"));
+        assert!(vm_display_signal("Red Hat QXL controller"));
+        assert!(vm_display_signal("Citrix Indirect Display Adapter"));
+    }
+
+    #[test]
+    fn vm_display_signal_rejects_real_gpus() {
+        assert!(!vm_display_signal("NVIDIA GeForce RTX 4090"));
+        assert!(!vm_display_signal("AMD Radeon RX 7900 XTX"));
+        assert!(!vm_display_signal("Intel UHD Graphics 770"));
+        assert!(!vm_display_signal("Intel Iris Xe Graphics"));
     }
 
     #[test]
