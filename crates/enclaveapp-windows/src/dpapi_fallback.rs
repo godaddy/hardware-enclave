@@ -176,7 +176,9 @@ fn collect_vm_diagnostics_windows() -> VmDiagnostics {
 
     let registry_values: Vec<(String, Option<String>)> = registry_checks
         .iter()
-        .map(|&(label, subkey, value_name)| (label.to_string(), registry_string(subkey, value_name)))
+        .map(|&(label, subkey, value_name)| {
+            (label.to_string(), registry_string(subkey, value_name))
+        })
         .collect();
 
     let hyperv_guest = hyperv_guest_parameters_exist();
