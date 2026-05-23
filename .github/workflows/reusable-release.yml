@@ -80,6 +80,10 @@ on:
         required: false
       SCOOP_BUCKET_TOKEN:
         required: false
+      HOMEBREW_TAP_DEPLOY_KEY:
+        required: false
+      SCOOP_BUCKET_DEPLOY_KEY:
+        required: false
       MACOS_SIGNING_CERTIFICATE_P12:
         description: 'Base64-encoded .p12 holding the Developer ID Application cert + private key. Required when macos_signing_identity is set.'
         required: false
@@ -756,7 +760,14 @@ jobs:
             ship_linux=1
           fi
 
-          git clone "https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/${tap_repo}.git" /tmp/tap
+          if [ -n "${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}" ]; then
+            eval $(ssh-agent -s)
+            echo "${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}" | ssh-add -
+            mkdir -p ~/.ssh && ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+            git clone git@github.com:${tap_repo}.git /tmp/tap
+          else
+            git clone "https://x-access-token:${{ secrets.HOMEBREW_TAP_TOKEN }}@github.com/${tap_repo}.git" /tmp/tap
+          fi
 
           # Pick the macOS binary list — falls back to unix_binaries
           # when consumers haven't set macos_binaries explicitly.
@@ -928,7 +939,14 @@ jobs:
           bucket_repo=$(echo "$SCOOP_CFG" | python3 -c "import sys,json; print(json.load(sys.stdin)['bucket_repo'])")
           win_sha=$(sha256sum "artifacts/${APP}-x86_64-pc-windows-msvc/${APP}-x86_64-pc-windows-msvc.zip" | cut -d' ' -f1)
 
-          git clone "https://x-access-token:${{ secrets.SCOOP_BUCKET_TOKEN }}@github.com/${bucket_repo}.git" /tmp/bucket
+          if [ -n "${{ secrets.SCOOP_BUCKET_DEPLOY_KEY }}" ]; then
+            eval $(ssh-agent -s)
+            echo "${{ secrets.SCOOP_BUCKET_DEPLOY_KEY }}" | ssh-add -
+            mkdir -p ~/.ssh && ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+            git clone git@github.com:${bucket_repo}.git /tmp/bucket
+          else
+            git clone "https://x-access-token:${{ secrets.SCOOP_BUCKET_TOKEN }}@github.com/${bucket_repo}.git" /tmp/bucket
+          fi
 
           TAG="$tag" VERSION="$version" WIN_SHA="$win_sha" python3 <<'PY' > "/tmp/bucket/bucket/${APP}.json"
           import json, os
