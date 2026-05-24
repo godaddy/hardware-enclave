@@ -384,7 +384,7 @@ fn app_key_wrap(plaintext: &[u8], ak: &[u8; 32]) -> Result<Zeroizing<Vec<u8>>> {
     let cipher = Aes256Gcm::new_from_slice(ak).map_err(|e| Error::EncryptFailed {
         detail: format!("app key AES init: {e}"),
     })?;
-    let mut nonce_bytes = [0u8; GCM_NONCE_SIZE];
+    let mut nonce_bytes = [0_u8; GCM_NONCE_SIZE];
     rand::rng().fill_bytes(&mut nonce_bytes);
     let encrypted = cipher
         .encrypt(&Nonce::from(nonce_bytes), plaintext)
@@ -417,7 +417,13 @@ fn app_key_unwrap(data: &[u8], ak: &[u8; 32]) -> Result<Zeroizing<Vec<u8>>> {
     let cipher = Aes256Gcm::new_from_slice(ak).map_err(|e| Error::DecryptFailed {
         detail: format!("app key AES init: {e}"),
     })?;
-    let nonce = Nonce::from_slice(&data[..GCM_NONCE_SIZE]);
+    let nonce_arr: [u8; GCM_NONCE_SIZE] =
+        data[..GCM_NONCE_SIZE]
+            .try_into()
+            .map_err(|_| Error::DecryptFailed {
+                detail: "nonce slice length mismatch".into(),
+            })?;
+    let nonce = Nonce::from(nonce_arr);
     let plaintext = cipher
         .decrypt(nonce, &data[GCM_NONCE_SIZE..])
         .map_err(|e| Error::DecryptFailed {
