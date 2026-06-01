@@ -9,6 +9,20 @@
 //! that the legacy `NCRYPT_UI_PROTECT_KEY_FLAG` path produces is bypassed
 //! by the caller (key is created without that flag).
 //!
+//! ## Fallback when Hello is not enrolled
+//!
+//! Not every user has Windows Hello / PIN configured. When
+//! `UserConsentVerifier` reports the device is unusable for this user
+//! (`DeviceNotPresent` / `NotConfiguredForUser` / `DisabledByPolicy`),
+//! the gate falls back to the Windows account-password soft gate in
+//! [`crate::password_gate`] so a user-presence check is still enforced.
+//! If neither Hello nor a verifiable password is available (e.g. a
+//! headless session or a passwordless account), the gate degrades to no
+//! prompt — the credential bundle remains TPM-encrypted regardless. This
+//! avoids the perverse outcome where opting into the gate would impose
+//! prompt friction on Hello users while leaving non-Hello users with no
+//! presence signal at all.
+//!
 //! ## Threat-model trade-off
 //!
 //! The `UserConsentVerifier` API returns a `UserConsentVerificationResult`
@@ -140,18 +154,15 @@ fn prompt_user_consent(reason: &str) -> Result<()> {
 
     match result {
         UserConsentVerificationResult::Verified => Ok(()),
-        UserConsentVerificationResult::DeviceNotPresent => Err(Error::KeyOperation {
-            operation: "hello_request_verification".into(),
-            detail: "Windows Hello is not configured for this user (DeviceNotPresent)".into(),
-        }),
-        UserConsentVerificationResult::NotConfiguredForUser => Err(Error::KeyOperation {
-            operation: "hello_request_verification".into(),
-            detail: "Windows Hello is not configured for this user (NotConfiguredForUser)".into(),
-        }),
-        UserConsentVerificationResult::DisabledByPolicy => Err(Error::KeyOperation {
-            operation: "hello_request_verification".into(),
-            detail: "Windows Hello is disabled by policy".into(),
-        }),
+        // Hello is not usable for this user on this host. Rather than
+        // hard-failing (which would lock out everyone without Hello), fall
+        // back to the Windows account-password soft gate so a presence
+        // check is still enforced. See [`crate::password_gate`].
+        UserConsentVerificationResult::DeviceNotPresent
+        | UserConsentVerificationResult::NotConfiguredForUser
+        | UserConsentVerificationResult::DisabledByPolicy => {
+            fallback_to_password_gate(reason, result)
+        }
         UserConsentVerificationResult::DeviceBusy => Err(Error::KeyOperation {
             operation: "hello_request_verification".into(),
             detail: "Windows Hello device is busy; try again".into(),
@@ -168,6 +179,38 @@ fn prompt_user_consent(reason: &str) -> Result<()> {
             operation: "hello_request_verification".into(),
             detail: format!("UserConsentVerifier returned unexpected result {other:?}"),
         }),
+    }
+}
+
+/// Fall back to the Windows account-password soft gate when Hello is not
+/// enrolled. `hello_result` is the `UserConsentVerifier` outcome that
+/// triggered the fallback, logged for diagnostics. Returns `Ok(())` when
+/// the user proves presence *or* when no presence check is possible at
+/// all (degraded path — the credential bundle stays TPM-encrypted).
+/// Returns an error only when the user actively declines or fails the
+/// password prompt.
+fn fallback_to_password_gate(
+    reason: &str,
+    hello_result: UserConsentVerificationResult,
+) -> Result<()> {
+    use crate::password_gate::{verify_current_user, PresenceOutcome};
+
+    match verify_current_user(reason) {
+        PresenceOutcome::Verified => Ok(()),
+        PresenceOutcome::Denied(detail) => Err(Error::KeyOperation {
+            operation: "password_request_verification".into(),
+            detail,
+        }),
+        PresenceOutcome::Unavailable(detail) => {
+            tracing::warn!(
+                hello_result = ?hello_result,
+                reason = %detail,
+                "Windows Hello is not enrolled and the password presence gate is \
+                 unavailable; proceeding without a presence prompt (credentials \
+                 remain TPM-encrypted)"
+            );
+            Ok(())
+        }
     }
 }
 

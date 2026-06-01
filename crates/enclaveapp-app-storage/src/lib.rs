@@ -163,6 +163,14 @@ pub struct StorageConfig {
     ///   which fires the modern Windows Hello biometric/PIN UI.
     /// - The verification is cached for `wrapping_key_cache_ttl` so repeated
     ///   operations within the window do not re-prompt.
+    /// - **When Hello is not enrolled** (`DeviceNotPresent` /
+    ///   `NotConfiguredForUser` / `DisabledByPolicy`) the gate falls back to
+    ///   a Windows account-password prompt (`CredUIPromptForWindowsCredentialsW`
+    ///   validated via `LogonUserW`) so a user-presence check is still
+    ///   enforced. If neither Hello nor a verifiable password is available
+    ///   (headless session, passwordless account) the gate degrades to no
+    ///   prompt; the bundle is TPM-encrypted regardless. See
+    ///   `enclaveapp_windows::password_gate`.
     ///
     /// **AccessPolicy override:** When this flag is `true` the
     /// [`StorageConfig::access_policy`] field is **overridden to

@@ -29,6 +29,8 @@ pub mod meta_migration_marker;
 #[cfg(target_os = "windows")]
 pub mod meta_tag;
 #[cfg(target_os = "windows")]
+pub mod password_gate;
+#[cfg(target_os = "windows")]
 mod provider;
 #[cfg(target_os = "windows")]
 pub mod ui_policy;
