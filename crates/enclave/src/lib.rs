@@ -42,7 +42,8 @@ pub use exec::{IntegrationType, SecureProcess, TempSecretFile};
 pub use factory::{create_auth, create_encryptor, create_signer, create_tamper_evident};
 pub use integrity::{TamperEvidentHandle, VerifyOutcome};
 pub use memory::{
-    coffer_view, pool_acquire, pool_release, LockedBuffer, MemoryEnclave, PoolSlot, SecureBuffer,
+    coffer_view, init_pool, pool_acquire, pool_release, LockedBuffer, MemoryEnclave, PoolSlot,
+    SecureBuffer, TieredPool, TieredPoolConfig,
 };
 pub use signing::SignerHandle;
 pub use types::{AccessPolicy, BackendKind, KeyInfo, KeyType, PresenceMode, PresenceOptions};
