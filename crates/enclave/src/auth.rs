@@ -81,6 +81,9 @@ pub fn platform_auth_capabilities() -> AuthCapabilities {
 
     #[cfg(target_os = "windows")]
     return AuthCapabilities {
+        // biometric_available: true is a conservative estimate; actual Windows Hello
+        // availability is determined at operation time. Some machines may not have
+        // Hello enrolled.
         biometric_available: true,
         password_available: true,
         presence_caching: false,

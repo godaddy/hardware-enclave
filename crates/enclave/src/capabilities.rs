@@ -11,7 +11,9 @@ pub use enclaveapp_core::signing::is_binary_signed;
 /// True iff the running binary has the named keychain-access-groups entitlement.
 /// On macOS, runs `codesign -d --entitlements -` and checks for the group string.
 /// On other platforms, always returns false.
-/// Result is cached per group string.
+///
+/// The result is cached for the process lifetime. A binary that is re-signed while
+/// running will not see the updated entitlement in the cache until the next process start.
 pub fn has_keychain_entitlement(group: &str) -> bool {
     #[cfg(target_os = "macos")]
     {

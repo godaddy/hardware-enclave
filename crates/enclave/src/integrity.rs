@@ -108,15 +108,21 @@ impl TamperEvidentHandle {
         let stored_hex = stored_hex.trim();
 
         // Decode stored hex to raw bytes (structural check, not secret comparison).
+        // On invalid hex (wrong chars, not just wrong length), treat as Tamper —
+        // the sidecar is attacker-influenced and malformed content is evidence of corruption.
         if stored_hex.len() != 64 {
             return Ok(VerifyOutcome::Tamper);
         }
         let mut stored_bytes = [0_u8; 32];
         for (i, chunk) in stored_hex.as_bytes().chunks(2).enumerate() {
-            let hex_str = std::str::from_utf8(chunk)
-                .map_err(|_| Error::Config("invalid sidecar hex".into()))?;
-            stored_bytes[i] = u8::from_str_radix(hex_str, 16)
-                .map_err(|_| Error::Config("invalid sidecar hex".into()))?;
+            let hex_str = match std::str::from_utf8(chunk) {
+                Ok(s) => s,
+                Err(_) => return Ok(VerifyOutcome::Tamper),
+            };
+            stored_bytes[i] = match u8::from_str_radix(hex_str, 16) {
+                Ok(b) => b,
+                Err(_) => return Ok(VerifyOutcome::Tamper),
+            };
         }
 
         let computed: [u8; 32] = compute_meta_hmac_bytes(key.as_slice(), &content);
@@ -202,6 +208,41 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    // ── Second-pass regression tests ────────────────────────────────
+
+    #[test]
+    fn verify_invalid_hex_in_sidecar_returns_tamper_not_config_error() {
+        // Finding 2 regression: a sidecar with embedded non-hex bytes must return
+        // Tamper, not Err(Config(...)), so callers checking for TamperDetected don't miss it.
+        let dir = TempDir::new().unwrap();
+        let handle = TamperEvidentHandle::with_key("test", vec![0x42_u8; 32]);
+        let path = dir.path().join("file.txt");
+        handle.write(&path, b"content").unwrap();
+        // Overwrite sidecar with 64-byte string containing a null byte (invalid UTF-8 / non-hex).
+        let mut bad_hex = vec![b'a'; 64];
+        bad_hex[10] = b'\x00';
+        let sidecar = dir.path().join("file.txt.hmac");
+        fs::write(&sidecar, &bad_hex).unwrap();
+        let outcome = handle.verify(&path).unwrap();
+        assert_eq!(
+            outcome,
+            VerifyOutcome::Tamper,
+            "invalid hex in sidecar must return Tamper, not a Config error"
+        );
+    }
+
+    #[test]
+    fn read_store_unavailable_returns_content() {
+        // Locks in the documented fail-open contract: StoreUnavailable → content returned.
+        let handle = TamperEvidentHandle::without_key("test");
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("file.txt");
+        fs::write(&path, b"unverified content").unwrap();
+        // No sidecar needed — StoreUnavailable fires before sidecar check.
+        let result = handle.read(&path).unwrap();
+        assert_eq!(result, b"unverified content");
+    }
 
     #[test]
     fn write_and_verify_match() {

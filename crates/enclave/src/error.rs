@@ -86,6 +86,12 @@ impl From<enclaveapp_core::Error> for Error {
             },
             CE::Config(s) | CE::Serialization(s) => Error::Config(s),
             CE::Io(e) => Error::Io(e),
+            // non_exhaustive fallback — add explicit arms for new enclaveapp_core::Error
+            // variants as they are introduced
+            other => Error::KeyOperation {
+                operation: "unknown".into(),
+                detail: other.to_string(),
+            },
         }
     }
 }

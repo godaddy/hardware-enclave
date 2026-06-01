@@ -72,6 +72,17 @@ fn validate_and_resolve_config(
         });
     }
 
+    // Log when macOS-specific config options are set on non-macOS platforms.
+    #[cfg(not(target_os = "macos"))]
+    if sc.wrapping_key_user_presence || sc.keychain_access_group.is_some() {
+        tracing::debug!(
+            app = %sc.app_name,
+            wrapping_key_user_presence = sc.wrapping_key_user_presence,
+            keychain_access_group = ?sc.keychain_access_group,
+            "macOS-specific config options set on non-macOS platform; they will be ignored"
+        );
+    }
+
     // Downgrade: access_group requested but entitlement absent -> use legacy keychain.
     #[cfg(target_os = "macos")]
     if let Some(ref group) = sc.keychain_access_group.clone() {

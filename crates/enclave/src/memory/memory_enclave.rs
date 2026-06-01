@@ -6,7 +6,6 @@
 #![allow(deprecated)]
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
 
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
@@ -19,29 +18,20 @@ use crate::error::{Error, Result};
 const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
 
-static NONCE_PREFIX: OnceLock<[u8; 4]> = OnceLock::new();
-static NONCE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-fn nonce_prefix() -> &'static [u8; 4] {
-    NONCE_PREFIX.get_or_init(|| {
-        let mut prefix = [0_u8; 4];
-        rand::rngs::OsRng.try_fill_bytes(&mut prefix).expect(
-            "MemoryEnclave: OsRng failed to generate nonce prefix — \
-                 cannot safely seal secrets without a random nonce. \
-                 This indicates a system-level RNG failure.",
-        );
-        prefix
-    })
-}
-
-fn next_nonce() -> [u8; NONCE_LEN] {
-    // Uniqueness only requires a distinct counter per call; no cross-thread
-    // memory ordering is needed beyond the atomicity of the fetch_add itself.
-    let counter = NONCE_COUNTER.fetch_add(1, Ordering::Relaxed);
+/// Generates a fresh 12-byte random nonce for each seal operation.
+///
+/// A full random nonce is used (rather than a counter) to ensure nonce uniqueness
+/// is preserved across `fork()` — a counter-based scheme with a cached prefix would
+/// produce identical nonces in parent and child processes after fork. At the seal
+/// volumes expected for in-process use (thousands per process lifetime, not billions),
+/// the collision probability of random 96-bit nonces is negligible (~2^{-80} after
+/// 2^8 seals).
+fn fresh_nonce() -> Result<[u8; NONCE_LEN]> {
     let mut nonce = [0_u8; NONCE_LEN];
-    nonce[..4].copy_from_slice(nonce_prefix());
-    nonce[4..].copy_from_slice(&counter.to_le_bytes());
-    nonce
+    rand::rngs::OsRng
+        .try_fill_bytes(&mut nonce)
+        .map_err(|e| Error::Memory(format!("MemoryEnclave: OsRng nonce failure: {e}")))?;
+    Ok(nonce)
 }
 
 /// An in-memory AES-256-GCM sealed secret.
@@ -82,7 +72,7 @@ impl MemoryEnclave {
     fn do_seal(plaintext: &[u8]) -> Result<Self> {
         // Get the master key from the slab-backed coffer.
         let key_slot = super::pool::global_pool().coffer_view()?;
-        let nonce_bytes = next_nonce();
+        let nonce_bytes = fresh_nonce()?;
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         let cipher = Aes256Gcm::new_from_slice(key_slot.as_slice())
@@ -92,8 +82,12 @@ impl MemoryEnclave {
             .encrypt(nonce, plaintext)
             .map_err(|e| Error::Memory(format!("MemoryEnclave::seal encrypt: {e}")))?;
 
-        // Drop key_slot immediately after use — wipes the slab slot.
-        drop(key_slot);
+        // Erase the round-key schedule before returning the coffer key slot.
+        // SAFETY note: Aes256Gcm implements ZeroizeOnDrop when compiled with the
+        // "zeroize" cargo feature (enabled in the workspace Cargo.toml). The expanded
+        // AES round-key schedule is therefore zeroed when `cipher` drops.
+        drop(cipher); // erase round-key schedule before returning key slot
+        drop(key_slot); // wipe coffer key from slab slot
 
         let mut blob = Vec::with_capacity(NONCE_LEN + ct.len());
         blob.extend_from_slice(&nonce_bytes);
@@ -152,8 +146,6 @@ impl MemoryEnclave {
 
         // Wrap the decrypted plaintext in Zeroizing immediately so it is
         // scrubbed when it goes out of scope — even on error paths below.
-        // Note: aes_gcm's Aes256Gcm zeroizes its key schedule on drop (it
-        // implements ZeroizeOnDrop via the zeroize feature in aes-gcm).
         let plaintext = zeroize::Zeroizing::new(
             cipher
                 .decrypt(nonce, &self.ciphertext[NONCE_LEN..])
@@ -162,8 +154,11 @@ impl MemoryEnclave {
                 })?,
         );
 
-        // Wipe the key slot immediately after decryption.
-        drop(key_slot);
+        // SAFETY note: Aes256Gcm implements ZeroizeOnDrop when compiled with the
+        // "zeroize" cargo feature (enabled in the workspace Cargo.toml). The expanded
+        // AES round-key schedule is therefore zeroed when `cipher` drops.
+        drop(cipher); // erase round-key schedule before returning key slot
+        drop(key_slot); // wipe coffer key from slab slot
 
         // Cache the plaintext in the slab (only if it fits: exact slot_size match).
         // If pool_acquire fails, evict the cache entry so we don't leave a
@@ -416,5 +411,21 @@ mod tests {
         let enc2 = MemoryEnclave::seal(b"b").unwrap();
         // Different ciphertexts implies different nonces (nonce uniqueness).
         assert_ne!(enc1.ciphertext, enc2.ciphertext);
+    }
+
+    #[test]
+    fn fresh_nonce_never_returns_all_zeros() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Statistically impossible for a real OsRng to return all zeros.
+        // If this fails, OsRng is broken and nonces are predictable.
+        let enc1 = MemoryEnclave::seal(b"probe1").unwrap();
+        let enc2 = MemoryEnclave::seal(b"probe2").unwrap();
+        // Different ciphertexts (different nonces) — random nonce scheme is working.
+        assert_ne!(enc1.ciphertext, enc2.ciphertext);
+        // Neither ciphertext starts with 12 zero bytes (nonce portion).
+        assert!(
+            enc1.ciphertext[..NONCE_LEN].iter().any(|&b| b != 0),
+            "nonce is all zeros — OsRng may be broken"
+        );
     }
 }

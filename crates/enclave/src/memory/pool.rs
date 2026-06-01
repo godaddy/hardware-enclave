@@ -1,6 +1,13 @@
 // Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
+//! Tiered pool of mlock'd slab slots and standalone guard-paged buffers.
+//!
+//! # Initialization
+//! The global memory pool is lazily initialized on first use. For reliable startup-time
+//! error reporting, call [`init_pool()`] explicitly before using any [`MemoryEnclave`] or
+//! [`pool_acquire()`] operations.
+
 #![allow(unsafe_code)]
 
 use std::sync::{Condvar, Mutex, OnceLock};

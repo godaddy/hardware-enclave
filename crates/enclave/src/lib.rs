@@ -15,6 +15,11 @@
 //! let sig = signer.sign("default", b"hello world")?;
 //! # Ok::<(), enclave::Error>(())
 //! ```
+//!
+//! # Memory pool initialization
+//! The global memory pool is lazily initialized on first use. For reliable startup-time
+//! error reporting, call [`init_pool()`] explicitly before using any [`MemoryEnclave`] or
+//! [`pool_acquire()`] operations.
 
 pub mod auth;
 pub mod capabilities;

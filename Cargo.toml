@@ -64,7 +64,7 @@ ciborium = "0.2"
 # Crypto
 sha2 = "0.10"
 p256 = { version = "0.13", features = ["ecdh", "ecdsa"] }
-aes-gcm = "0.10"
+aes-gcm = { version = "0.10", features = ["zeroize"] }
 elliptic-curve = { version = "0.13", features = ["sec1"] }
 
 # Windows

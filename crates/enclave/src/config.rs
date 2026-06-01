@@ -17,6 +17,11 @@ pub enum PlatformConfig {
     Linux(LinuxConfig),
 }
 
+/// macOS-specific configuration overrides.
+///
+/// When using struct-update syntax (`..MacOsConfig::default()`), newly added
+/// security-relevant fields will use their default values. Review the changelog
+/// when updating the crate version to check for new fields.
 #[derive(Debug, Clone)]
 pub struct MacOsConfig {
     pub wrapping_key_user_presence: bool,
@@ -38,6 +43,11 @@ impl Default for MacOsConfig {
     }
 }
 
+/// Windows-specific configuration overrides.
+///
+/// When using struct-update syntax (`..WindowsConfig::default()`), newly added
+/// security-relevant fields will use their default values. Review the changelog
+/// when updating the crate version to check for new fields.
 #[derive(Debug, Clone)]
 pub struct WindowsConfig {
     pub prefer_windows_hello_ux: bool,

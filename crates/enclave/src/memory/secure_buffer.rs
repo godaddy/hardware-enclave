@@ -238,11 +238,11 @@ impl SecureBuffer {
             drop(unsafe { os_unlock(self.inner_ptr.as_ptr(), inner_rounded) });
         }
 
-        // Restore guard pages to writable before freeing the whole mapping.
-        drop(unsafe { os_protect(pre_guard, ps, Protection::ReadWrite) });
-        drop(unsafe { os_protect(post_guard, ps, Protection::ReadWrite) });
-
         // Free entire allocation.
+        // The guard pages remain PROT_NONE (set at construction); no need to restore
+        // them to ReadWrite before freeing — the OS reclaims the entire mapping on
+        // munmap/VirtualFree regardless of protection state. Restoring write access on
+        // guard pages before free is unnecessary and was removed (SG-E).
         drop(unsafe { os_free(self.alloc_ptr.as_ptr(), self.alloc_len) });
 
         self.state = State::Dead;

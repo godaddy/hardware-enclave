@@ -277,8 +277,10 @@ impl SecureSlab {
             // Need to evict. Make sure we don't evict the entry we're reading.
             let lru_id = *self.cache_lru.front()?;
             if lru_id == id {
-                // The only cached entry is the one we want — can't copy without
-                // evicting it. Return None (caller must do cold path decrypt).
+                // Guard: never evict the entry we're about to read. If the only free slot
+                // requires evicting our own entry, return None (no available slot). This
+                // prevents a scenario where cache_get would evict id's entry then try to
+                // copy from a freed slot.
                 return None;
             }
             self.cache_evict(lru_id);
@@ -286,6 +288,12 @@ impl SecureSlab {
         };
 
         // Copy cached slot bytes into the transient slot.
+        // SAFETY: `cached_idx` is in `cache_map`, so it was never released to the free list;
+        // its slot is within the mlock'd page (index < total_slots, validated at checkout time).
+        // `out_idx` was just popped from `self.free` via `acquire_transient`, so it is also
+        // in-bounds, non-aliased, and not in `cache_map`. The two indices are distinct because
+        // `cached_idx` is in `cache_map` (not free) and `out_idx` was just removed from `free`.
+        // Both raw slices are non-overlapping slices of the same mlock'd allocation.
         unsafe {
             let src = std::slice::from_raw_parts(self.slot_ptr(cached_idx), self.slot_size);
             let dst = std::slice::from_raw_parts_mut(self.slot_ptr(out_idx), self.slot_size);
@@ -331,6 +339,10 @@ impl SecureSlab {
         };
 
         // Write data into the slot.
+        // SAFETY: `slot_idx` was just popped from `self.free` and is not in `transient` or
+        // `cache_map`. It is in-bounds (free list only contains valid indices 2..total_slots).
+        // The slice lives within the single mlock'd page allocation which is valid for the
+        // lifetime of this SecureSlab.
         unsafe {
             let dst = std::slice::from_raw_parts_mut(self.slot_ptr(slot_idx), self.slot_size);
             dst.copy_from_slice(data);
@@ -377,6 +389,10 @@ impl SecureSlab {
             h.copy_from_slice(&digest);
             let out = std::slice::from_raw_parts_mut(self.slot_ptr(out_idx), self.slot_size);
             for i in 0..self.slot_size {
+                // Note: for slot_size > 32 the hash repeats cyclically (h[i % 32]), reducing
+                // the effective keystream entropy. slot_size == 32 (DEFAULT_SLOT_SIZE) is
+                // required for the coffer (enforced in SecureSlab::new). This branch is
+                // unreachable in practice.
                 out[i] = left[i] ^ h[i % 32];
             }
             // h is zeroized on drop automatically.

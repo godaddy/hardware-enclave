@@ -6,6 +6,7 @@
 use thiserror::Error;
 
 /// Core error type shared across enclaveapp crates.
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("hardware security module not available")]
