@@ -11,9 +11,7 @@ use std::sync::OnceLock;
 use aes_gcm::aead::Aead;
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use rand::TryRngCore;
-use zeroize::Zeroizing;
 
-use super::coffer::master_key;
 use super::pool::{hot_cache_evict, hot_cache_get, hot_cache_insert, pool_acquire, PoolSlot};
 use super::secure_buffer::SecureBuffer;
 use crate::error::{Error, Result};
@@ -49,9 +47,10 @@ fn next_nonce() -> [u8; NONCE_LEN] {
 /// An in-memory AES-256-GCM sealed secret.
 ///
 /// Plaintext is encrypted under the process-global Coffer master key.
-/// `open()` returns the plaintext in a `PoolSlot` (slab-backed if ≤ slot_size,
-/// otherwise standalone `SecureBuffer`). A hot cache avoids decryption when
-/// the same `MemoryEnclave` is opened multiple times in quick succession.
+/// `open()` returns the plaintext in a `PoolSlot` (slab-backed if the
+/// plaintext fits in the smallest tier's slot size, otherwise standalone).
+/// A hot cache in the slab avoids decryption when the same `MemoryEnclave`
+/// is opened multiple times in quick succession.
 ///
 /// When dropped, the hot cache entry for this enclave is evicted.
 pub struct MemoryEnclave {
@@ -74,16 +73,20 @@ impl std::fmt::Debug for MemoryEnclave {
 
 impl MemoryEnclave {
     fn do_seal(plaintext: &[u8]) -> Result<Self> {
-        let key = master_key()?;
+        // Get the master key from the slab-backed coffer.
+        let key_slot = super::pool::global_pool().coffer_view()?;
         let nonce_bytes = next_nonce();
         let nonce = Nonce::from_slice(&nonce_bytes);
 
-        let cipher = Aes256Gcm::new_from_slice(key.as_ref())
+        let cipher = Aes256Gcm::new_from_slice(key_slot.as_slice())
             .map_err(|e| Error::Memory(format!("MemoryEnclave::seal cipher init: {e}")))?;
 
         let ct = cipher
             .encrypt(nonce, plaintext)
             .map_err(|e| Error::Memory(format!("MemoryEnclave::seal encrypt: {e}")))?;
+
+        // Drop key_slot immediately after use — wipes the slab slot.
+        drop(key_slot);
 
         let mut blob = Vec::with_capacity(NONCE_LEN + ct.len());
         blob.extend_from_slice(&nonce_bytes);
@@ -119,16 +122,12 @@ impl MemoryEnclave {
     /// Decrypt and return the plaintext in a `PoolSlot`.
     ///
     /// Hot cache fast path: if this enclave was recently opened, the plaintext
-    /// is copied from the cache into a new `PoolSlot` without AES-GCM decryption.
-    /// The cached copy lives in regular heap memory and should not be held longer
-    /// than necessary.
+    /// is copied from the slab cache into a new transient `PoolSlot` without
+    /// AES-GCM decryption.
     pub fn open(&self) -> Result<PoolSlot> {
-        // Hot cache lookup.
+        // Hot cache lookup (slab-backed copy).
         if let Some(cached) = hot_cache_get(self.id) {
-            let mut slot = pool_acquire(cached.len())?;
-            let len = cached.len().min(slot.size());
-            slot.bytes()[..len].copy_from_slice(&cached[..len]);
-            return Ok(slot);
+            return Ok(cached);
         }
 
         // Cold path: decrypt.
@@ -138,10 +137,10 @@ impl MemoryEnclave {
             ));
         }
 
-        let key = master_key()?;
+        let key_slot = super::pool::global_pool().coffer_view()?;
         let nonce = Nonce::from_slice(&self.ciphertext[..NONCE_LEN]);
 
-        let cipher = Aes256Gcm::new_from_slice(key.as_ref())
+        let cipher = Aes256Gcm::new_from_slice(key_slot.as_slice())
             .map_err(|e| Error::Memory(format!("MemoryEnclave::open cipher init: {e}")))?;
 
         let plaintext = cipher
@@ -150,13 +149,17 @@ impl MemoryEnclave {
                 detail: "MemoryEnclave::open: authentication failed".into(),
             })?;
 
-        // Populate hot cache before copying into slot.
-        hot_cache_insert(self.id, Zeroizing::new(plaintext.clone()));
+        // Wipe the key slot immediately after decryption.
+        drop(key_slot);
 
-        let mut slot = pool_acquire(plaintext.len())?;
-        let len = plaintext.len().min(slot.size());
-        slot.bytes()[..len].copy_from_slice(&plaintext[..len]);
-        Ok(slot)
+        // Cache the plaintext in the slab (only if it fits: exact slot_size match).
+        hot_cache_insert(self.id, &plaintext);
+
+        // Return plaintext in a fresh PoolSlot.
+        let mut out_slot = pool_acquire(plaintext.len())?;
+        let copy_len = plaintext.len().min(out_slot.size());
+        out_slot.bytes()[..copy_len].copy_from_slice(&plaintext[..copy_len]);
+        Ok(out_slot)
     }
 
     pub fn plaintext_len(&self) -> usize {
@@ -170,7 +173,12 @@ impl MemoryEnclave {
 
 impl Drop for MemoryEnclave {
     fn drop(&mut self) {
-        hot_cache_evict(self.id);
+        // Capture `id` by value (Copy) so the closure is UnwindSafe.
+        let id = self.id;
+        // catch_unwind prevents a double-panic during stack unwind.
+        drop(std::panic::catch_unwind(move || {
+            hot_cache_evict(id);
+        }));
     }
 }
 
@@ -200,8 +208,11 @@ mod tests {
         let secret = b"cached secret";
         let enc = MemoryEnclave::seal(secret).unwrap();
         let s1 = enc.open().unwrap();
+        // Drop s1 before opening again (releases slab slot for second open).
+        let bytes1 = s1.as_slice()[..secret.len()].to_vec();
+        drop(s1);
         let s2 = enc.open().unwrap();
-        assert_eq!(&s1.as_slice()[..secret.len()], secret.as_ref());
+        assert_eq!(bytes1, secret.as_ref());
         assert_eq!(&s2.as_slice()[..secret.len()], secret.as_ref());
     }
 
@@ -211,7 +222,8 @@ mod tests {
         let secret = b"evicted secret";
         let id = {
             let enc = MemoryEnclave::seal(secret).unwrap();
-            let _slot = enc.open().unwrap(); // populate cache
+            let slot = enc.open().unwrap(); // populate cache
+            drop(slot);
             enc.id()
         }; // enc dropped here — should evict
         assert!(hot_cache_get(id).is_none());
@@ -227,6 +239,8 @@ mod tests {
         let s2 = enc2.open().unwrap();
         assert_eq!(&s1.as_slice()[..10], b"secret one");
         assert_eq!(&s2.as_slice()[..10], b"secret two");
+        drop(s1);
+        drop(s2);
     }
 
     #[test]
@@ -324,10 +338,7 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let secret = b"slot secret data";
         let mut slot = pool_acquire(secret.len()).unwrap();
-        // slot.size() may be larger than secret.len() (slab slot is DEFAULT_SLOT_SIZE).
         slot.bytes()[..secret.len()].copy_from_slice(secret);
-        // seal_slot seals the full slot (slot.size() bytes), so open returns
-        // at least secret.len() bytes.
         let enc = MemoryEnclave::seal_slot(&slot).unwrap();
         drop(slot);
         let out = enc.open().unwrap();

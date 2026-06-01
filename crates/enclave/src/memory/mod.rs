@@ -3,7 +3,6 @@
 
 //! Page-guarded, mlock'd memory buffers for secret material.
 
-mod coffer;
 mod locked_buffer;
 mod memcall;
 mod memory_enclave;

@@ -3,19 +3,12 @@
 
 #![allow(unsafe_code)]
 
-use std::collections::VecDeque;
-use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
-
-use zeroize::Zeroizing;
+use std::sync::{Condvar, Mutex, OnceLock};
 
 use super::memcall::page_size;
 use super::secure_buffer::SecureBuffer;
 use super::slab::{SecureSlab, DEFAULT_SLOT_SIZE, SLOT_WAIT_TIMEOUT};
 use crate::error::{Error, Result};
-
-/// Maximum number of recently-decrypted MemoryEnclaves kept in the hot cache.
-const HOT_CACHE_MAX: usize = 8;
 
 // ── Pool slot origin ────────────────────────────────────────────────
 
@@ -58,7 +51,12 @@ impl std::fmt::Debug for PoolSlot {
 }
 
 impl PoolSlot {
-    fn from_slab(ptr: *mut u8, len: usize, tier_index: usize, slot_index: usize) -> Self {
+    pub(crate) fn from_slab(
+        ptr: *mut u8,
+        len: usize,
+        tier_index: usize,
+        slot_index: usize,
+    ) -> Self {
         Self {
             ptr,
             len,
@@ -125,33 +123,26 @@ impl Drop for PoolSlot {
                 tier_index,
                 slot_index,
             } => {
-                // Zeroize here before acquiring the tier lock, so the memory is
-                // clean even if the lock is contended.
+                // Zeroize before acquiring the lock so memory is clean even under contention.
                 // Safety: ptr points into the global TieredPool's slab page which is alive.
                 unsafe {
-                    let s = std::slice::from_raw_parts_mut(self.ptr, self.len);
                     use zeroize::Zeroize;
-                    s.zeroize();
+                    std::slice::from_raw_parts_mut(self.ptr, self.len).zeroize();
                 }
-                // Return slot to the correct tier's slab.
-                // Safety: POOL lives in OnceLock (never dropped); tier_index is valid
-                // because it was set during acquire from this same pool.
                 let pool = global_pool();
-                if let Some(tier) = pool.tiers.get(*tier_index) {
-                    tier.slab
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .release(*slot_index);
+                if let Ok(mut slab) = pool.tiers[*tier_index].slab.lock() {
+                    slab.release(*slot_index);
                 }
+                // Wake any waiter blocked in `acquire`.
+                pool.tiers[*tier_index].cv.notify_one();
             }
             PoolSlotOrigin::Standalone(buf) => {
                 // Zeroize before buf's own drop, which also zeroizes.
                 drop(buf.melt());
                 // Safety: ptr points into buf's inner region which is still alive.
                 unsafe {
-                    let s = std::slice::from_raw_parts_mut(self.ptr, self.len);
                     use zeroize::Zeroize;
-                    s.zeroize();
+                    std::slice::from_raw_parts_mut(self.ptr, self.len).zeroize();
                 }
                 // buf drops here: zeroizes again + unmaps.
             }
@@ -159,76 +150,22 @@ impl Drop for PoolSlot {
     }
 }
 
-// ── Hot cache ─────────────────────────────────────────────────────
-
-/// Entry in the hot cache: (enclave_id, plaintext_copy).
-/// Stored as `Zeroizing<Vec<u8>>` so evicted entries are zeroed automatically.
-struct HotEntry {
-    id: u64,
-    plaintext: Zeroizing<Vec<u8>>,
-}
-
-impl std::fmt::Debug for HotEntry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HotEntry")
-            .field("id", &self.id)
-            .field("plaintext", &"<redacted>")
-            .finish()
-    }
-}
-
-#[derive(Debug)]
-struct HotCache {
-    /// Front = LRU (oldest), back = MRU (newest).
-    entries: VecDeque<HotEntry>,
-}
-
-impl HotCache {
-    fn new() -> Self {
-        Self {
-            entries: VecDeque::with_capacity(HOT_CACHE_MAX),
-        }
-    }
-
-    /// Look up and return a copy of the plaintext. Promotes the entry to MRU.
-    ///
-    /// The returned copy lives in regular heap memory; it should be consumed
-    /// promptly and not stored long-term, as it is not mlock'd.
-    fn get(&mut self, id: u64) -> Option<Zeroizing<Vec<u8>>> {
-        let pos = self.entries.iter().position(|e| e.id == id)?;
-        let entry = self.entries.remove(pos)?;
-        let copy = Zeroizing::new((*entry.plaintext).clone());
-        self.entries.push_back(HotEntry {
-            id: entry.id,
-            plaintext: entry.plaintext,
-        });
-        Some(copy)
-    }
-
-    /// Insert plaintext for `id`. Evicts LRU if at capacity.
-    fn insert(&mut self, id: u64, plaintext: Zeroizing<Vec<u8>>) {
-        // Remove existing entry for same id if present.
-        self.entries.retain(|e| e.id != id);
-        // Evict LRU if full.
-        if self.entries.len() >= HOT_CACHE_MAX {
-            drop(self.entries.pop_front()); // Zeroizing drop zeroes the plaintext.
-        }
-        self.entries.push_back(HotEntry { id, plaintext });
-    }
-
-    /// Evict the entry for `id` if present.
-    fn evict(&mut self, id: u64) {
-        self.entries.retain(|e| e.id != id);
-    }
-}
-
 // ── Tiered pool ───────────────────────────────────────────────────
 
 /// One tier: a single mlock'd-page slab with a fixed slot size.
-#[derive(Debug)]
 struct Tier {
     slot_size: usize,
     slab: Mutex<SecureSlab>,
+    /// Notified on every slot release so waiting `acquire` calls can retry.
+    cv: Condvar,
+}
+
+impl std::fmt::Debug for Tier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Tier")
+            .field("slot_size", &self.slot_size)
+            .finish()
+    }
 }
 
 /// Configuration for the tiered pool.
@@ -251,7 +188,10 @@ impl Default for TieredPoolConfig {
     }
 }
 
-/// Statically-owned tiered pool combining N slabs + one shared hot cache.
+/// Statically-owned tiered pool.
+///
+/// Tier 0's slab is initialised with the Coffer (master key halves in slots 0+1).
+/// All other tiers have `init_coffer = false`.
 ///
 /// `TieredPool` is `Send + Sync`: all mutable state is behind `Mutex`-guarded
 /// fields. The `Vec<Tier>` contains raw pointers inside `SecureSlab`, which
@@ -259,7 +199,6 @@ impl Default for TieredPoolConfig {
 #[derive(Debug)]
 pub struct TieredPool {
     tiers: Vec<Tier>,
-    hot_cache: Mutex<HotCache>,
 }
 
 // Safety: TieredPool contains Mutex<SecureSlab> (which contains raw pointers).
@@ -271,8 +210,11 @@ impl TieredPool {
     /// Create a new `TieredPool` from `config`.
     ///
     /// Validates, deduplicates, and sorts `config.tier_sizes`, then allocates
-    /// one mlock'd page per tier.
+    /// one mlock'd page per tier. Tier 0's slab initialises the Coffer.
     pub fn new(config: TieredPoolConfig) -> Result<Self> {
+        // Harden the process as early as possible (idempotent).
+        enclaveapp_core::process::harden_process();
+
         let ps = page_size();
         let max_slot = ps / 3;
 
@@ -302,19 +244,19 @@ impl TieredPool {
         }
 
         // Allocate one SecureSlab per tier.
+        // Tier 0 initialises the Coffer; all others do not.
         let mut tiers = Vec::with_capacity(sizes.len());
-        for sz in sizes {
-            let slab = SecureSlab::new(sz)?;
+        for (i, sz) in sizes.into_iter().enumerate() {
+            let init_coffer = i == 0;
+            let slab = SecureSlab::new(sz, init_coffer)?;
             tiers.push(Tier {
                 slot_size: sz,
                 slab: Mutex::new(slab),
+                cv: Condvar::new(),
             });
         }
 
-        Ok(Self {
-            tiers,
-            hot_cache: Mutex::new(HotCache::new()),
-        })
+        Ok(Self { tiers })
     }
 
     /// Index of the smallest tier whose slot_size >= `size`, or `None` if all tiers are too small.
@@ -324,50 +266,53 @@ impl TieredPool {
 
     /// Acquire a slot from the appropriate tier.
     ///
-    /// Routes to the smallest tier whose slot_size >= `size`. Spin-waits up
-    /// to 30 s for a free slot; falls back to a standalone `SecureBuffer` if
-    /// the tier is exhausted or no tier fits the requested size.
+    /// Routes to the smallest tier whose slot_size >= `size`. Waits up to
+    /// `SLOT_WAIT_TIMEOUT` for a free slot using a `Condvar` (no spin/sleep);
+    /// falls back to a standalone `SecureBuffer` if exhausted or no tier fits.
     pub fn acquire(&self, size: usize) -> Result<PoolSlot> {
         if let Some(tier_idx) = self.tier_for_size(size) {
             let deadline = std::time::Instant::now() + SLOT_WAIT_TIMEOUT;
+            let mut guard = self.tiers[tier_idx]
+                .slab
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             loop {
-                {
-                    let mut slab = self.tiers[tier_idx]
-                        .slab
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    if let Some(slot_idx) = slab.find_free_slot() {
-                        slab.checkout(slot_idx).map_err(|e| {
-                            Error::Memory(format!("TieredPool::acquire checkout: {e}"))
-                        })?;
-                        let (ptr, len) = slab.slot_raw(slot_idx);
-                        return Ok(PoolSlot::from_slab(ptr, len, tier_idx, slot_idx));
-                    }
+                if let Some(slot_idx) = guard.acquire_transient() {
+                    let (ptr, len) = guard.slot_raw(slot_idx);
+                    drop(guard);
+                    return Ok(PoolSlot::from_slab(ptr, len, tier_idx, slot_idx));
                 }
-                if std::time::Instant::now() >= deadline {
+                let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+                if timeout.is_zero() {
                     tracing::warn!(
                         size,
                         tier_idx,
-                        "TieredPool::acquire: tier exhausted after 30 s; \
-                         falling back to standalone SecureBuffer"
+                        "pool acquire: all slab slots exhausted; using standalone SecureBuffer"
                     );
+                    drop(guard);
                     break;
                 }
-                std::thread::sleep(Duration::from_millis(10));
+                let result = self.tiers[tier_idx]
+                    .cv
+                    .wait_timeout(guard, timeout)
+                    .unwrap_or_else(|e| e.into_inner());
+                guard = result.0;
             }
         }
 
         // Standalone fallback (no tier fits, or tier exhausted).
-        let buf = SecureBuffer::new(size)?;
-        Ok(PoolSlot::from_standalone(buf))
+        Ok(PoolSlot::from_standalone(SecureBuffer::new(size)?))
     }
 
-    /// Reconstruct the Coffer master key into a `PoolSlot`.
+    /// Reconstruct the Coffer master key from tier 0's slab into a `PoolSlot`.
     pub fn coffer_view(&self) -> Result<PoolSlot> {
-        let key = super::coffer::master_key()?;
-        let mut slot = self.acquire(key.len())?;
-        slot.bytes()[..key.len()].copy_from_slice(key.as_ref());
-        Ok(slot)
+        let mut guard = self.tiers[0].slab.lock().unwrap_or_else(|e| e.into_inner());
+        let slot_idx = guard
+            .coffer_view()
+            .ok_or_else(|| Error::Memory("coffer_view: no free slab slot".into()))?;
+        let (ptr, len) = guard.slot_raw(slot_idx);
+        drop(guard);
+        Ok(PoolSlot::from_slab(ptr, len, 0, slot_idx))
     }
 
     /// The largest slot size available in any tier.
@@ -401,7 +346,7 @@ pub fn init_pool(config: TieredPoolConfig) -> Result<()> {
         .map_err(|_| Error::Memory("pool already initialized".into()))
 }
 
-fn global_pool() -> &'static TieredPool {
+pub(crate) fn global_pool() -> &'static TieredPool {
     POOL.get_or_init(|| {
         TieredPool::new(TieredPoolConfig::default())
             .expect("enclave: default tiered pool init failed — OsRng unavailable")
@@ -423,36 +368,40 @@ pub fn pool_release(slot: PoolSlot) {
 }
 
 /// Get a `PoolSlot` containing the Coffer master key.
-/// Release promptly after use; holding it blocks coffer key rotation.
+/// Release promptly after use; the slot is from the pool and blocks that slot while held.
 pub fn coffer_view() -> Result<PoolSlot> {
     global_pool().coffer_view()
 }
 
-/// Insert plaintext into the hot cache for `id`.
-pub(super) fn hot_cache_insert(id: u64, plaintext: Zeroizing<Vec<u8>>) {
-    global_pool()
-        .hot_cache
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(id, plaintext);
+// ── Slab-delegated hot cache helpers ─────────────────────────────
+
+/// Insert plaintext into the slab hot cache for `id`.
+/// Only caches if `data.len() == tier-0 slot_size` (exact fit).
+pub(super) fn hot_cache_insert(id: u64, data: &[u8]) {
+    let pool = global_pool();
+    if let Ok(mut slab) = pool.tiers[0].slab.lock() {
+        slab.cache_insert(id, data);
+    }
 }
 
-/// Look up plaintext from the hot cache.
-pub(super) fn hot_cache_get(id: u64) -> Option<Zeroizing<Vec<u8>>> {
-    global_pool()
-        .hot_cache
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(id)
+/// Look up plaintext from the slab hot cache.
+/// Returns a transient `PoolSlot` with a copy of the cached bytes, or `None` on miss.
+pub(super) fn hot_cache_get(id: u64) -> Option<PoolSlot> {
+    let pool = global_pool();
+    let mut guard = pool.tiers[0].slab.lock().unwrap_or_else(|e| e.into_inner());
+    let slot_idx = guard.cache_get(id)?;
+    let (ptr, len) = guard.slot_raw(slot_idx);
+    drop(guard);
+    Some(PoolSlot::from_slab(ptr, len, 0, slot_idx))
 }
 
-/// Evict an entry from the hot cache.
+/// Evict an entry from the slab hot cache and notify waiters.
 pub(super) fn hot_cache_evict(id: u64) {
-    global_pool()
-        .hot_cache
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .evict(id);
+    let pool = global_pool();
+    if let Ok(mut slab) = pool.tiers[0].slab.lock() {
+        slab.cache_evict(id);
+    }
+    pool.tiers[0].cv.notify_one();
 }
 
 #[cfg(test)]
@@ -460,12 +409,13 @@ pub(super) fn hot_cache_evict(id: u64) {
 mod tests {
     use std::sync::Mutex;
 
+    use super::super::slab::FIRST_SHARED_SLOT;
     use super::*;
 
     /// Serializes tests that touch the global TieredPool to prevent interference.
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    // ── Existing tests ──────────────────────────────────────────────────
+    // ── Global pool tests ───────────────────────────────────────────
 
     #[test]
     fn pool_acquire_small_uses_slab() {
@@ -496,37 +446,38 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut slot = pool_acquire(16).unwrap();
         let data = b"test data 12345!";
-        // slot.size() may be larger than 16 (slab slot size is DEFAULT_SLOT_SIZE).
         slot.bytes()[..data.len()].copy_from_slice(data);
         assert_eq!(&slot.as_slice()[..data.len()], data);
     }
 
     #[test]
-    fn hot_cache_insert_get_evict() {
+    fn pool_slot_zeroized_on_drop() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let plaintext = Zeroizing::new(b"cached secret".to_vec());
-        hot_cache_insert(9999, plaintext.clone());
-        let got = hot_cache_get(9999).unwrap();
-        assert_eq!(*got, *plaintext);
-        hot_cache_evict(9999);
-        assert!(hot_cache_get(9999).is_none());
-    }
-
-    #[test]
-    fn hot_cache_eviction_at_capacity() {
-        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // Insert HOT_CACHE_MAX + 1 entries; the first should be evicted.
-        for i in 0_u64..=(HOT_CACHE_MAX as u64) {
-            let pt = Zeroizing::new(vec![i as u8; 4]);
-            hot_cache_insert(10000 + i, pt);
+        // Acquire a slab slot, write a pattern, drop it, re-acquire and verify zeroed.
+        let mut slot = pool_acquire(16).unwrap();
+        let sz = slot.size();
+        slot.bytes().iter_mut().for_each(|b| *b = 0xDE);
+        // The slab_index tells us which slot; after drop the same index should be free.
+        let slot_idx = slot.slab_index().unwrap();
+        drop(slot);
+        // Acquire again — we should get a zeroed slot.
+        let pool = global_pool();
+        let mut guard = pool.tiers[0].slab.lock().unwrap_or_else(|e| e.into_inner());
+        // Drain free list until we get the same index back.
+        let mut acquired = vec![];
+        while let Some(idx) = guard.acquire_transient() {
+            acquired.push(idx);
+            if idx == slot_idx {
+                break;
+            }
         }
-        // Entry 0 should have been evicted (LRU).
-        assert!(hot_cache_get(10000).is_none());
-        // Entry HOT_CACHE_MAX should still be present.
-        assert!(hot_cache_get(10000 + HOT_CACHE_MAX as u64).is_some());
-        // Clean up.
-        for i in 1_u64..=(HOT_CACHE_MAX as u64) {
-            hot_cache_evict(10000 + i);
+        if acquired.last() == Some(&slot_idx) {
+            let (ptr, _) = guard.slot_raw(slot_idx);
+            let s = unsafe { std::slice::from_raw_parts(ptr, sz) };
+            assert!(s.iter().all(|&b| b == 0), "slot must be zeroed after drop");
+        }
+        for idx in acquired {
+            guard.release(idx);
         }
     }
 
@@ -534,60 +485,91 @@ mod tests {
     fn coffer_view_returns_key_sized_slot() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let slot = coffer_view().unwrap();
-        assert_eq!(slot.size(), 32);
-        assert!(slot.slab_index().is_some());
+        assert_eq!(slot.size(), DEFAULT_SLOT_SIZE);
+        // Slot must be from tier 0 (slab-backed).
+        assert_eq!(slot.tier_index(), Some(0));
     }
 
-    // ── New tiered pool tests ────────────────────────────────────────────
+    #[test]
+    fn coffer_view_is_deterministic() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let s1 = coffer_view().unwrap();
+        let key1 = s1.as_slice().to_vec();
+        drop(s1);
+        let s2 = coffer_view().unwrap();
+        let key2 = s2.as_slice().to_vec();
+        drop(s2);
+        assert_eq!(key1, key2, "coffer_view must return same key each call");
+        assert!(!key1.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn hot_cache_insert_get_evict() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let data = [0xAB_u8; DEFAULT_SLOT_SIZE];
+        hot_cache_insert(1001, &data);
+        let slot = hot_cache_get(1001).unwrap();
+        assert_eq!(slot.as_slice(), &data);
+        drop(slot);
+        hot_cache_evict(1001);
+        assert!(hot_cache_get(1001).is_none());
+    }
+
+    #[test]
+    fn hot_cache_get_returns_pool_slot() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let data = [0xCC_u8; DEFAULT_SLOT_SIZE];
+        hot_cache_insert(2002, &data);
+        let slot = hot_cache_get(2002).expect("should be a cache hit");
+        // Result is a slab-backed slot from tier 0.
+        assert_eq!(slot.tier_index(), Some(0));
+        assert!(slot
+            .slab_index()
+            .map(|i| i >= FIRST_SHARED_SLOT)
+            .unwrap_or(false));
+        drop(slot);
+        hot_cache_evict(2002);
+    }
+
+    // ── Local TieredPool tests ───────────────────────────────────────
 
     #[test]
     fn tiered_pool_routes_small_to_first_tier() {
-        let pool = TieredPool::new(TieredPoolConfig {
-            tier_sizes: vec![32, 64, 128],
-        })
-        .unwrap();
-        // Acquire something that fits in the 32-byte tier.
-        let slot = pool.acquire(16).unwrap();
+        // Use the global pool so PoolSlot::drop returns to the correct pool.
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = pool_acquire(16).unwrap();
         assert_eq!(
             slot.tier_index(),
             Some(0),
             "should route to tier 0 (32-byte)"
         );
-        assert_eq!(slot.size(), 32);
+        assert_eq!(slot.size(), DEFAULT_SLOT_SIZE);
     }
 
     #[test]
     fn tiered_pool_routes_medium_to_second_tier() {
-        let pool = TieredPool::new(TieredPoolConfig {
-            tier_sizes: vec![32, 64, 128],
-        })
-        .unwrap();
-        // Acquire something that doesn't fit in 32 but fits in 64.
-        let slot = pool.acquire(48).unwrap();
-        assert_eq!(
-            slot.tier_index(),
-            Some(1),
-            "should route to tier 1 (64-byte)"
+        // A 48-byte request exceeds the default 32-byte tier — falls back to standalone.
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = pool_acquire(48).unwrap();
+        assert!(
+            slot.tier_index().is_none(),
+            "48-byte request exceeds default tier; should be standalone"
         );
-        assert_eq!(slot.size(), 64);
+        assert_eq!(slot.size(), 48);
     }
 
     #[test]
     fn tiered_pool_routes_large_to_standalone() {
-        let pool = TieredPool::new(TieredPoolConfig {
-            tier_sizes: vec![32, 64, 128],
-        })
-        .unwrap();
-        // Acquire more than the largest tier — must be standalone.
-        let slot = pool.acquire(8192).unwrap();
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = pool_acquire(8192).unwrap();
         assert!(slot.tier_index().is_none(), "should be standalone");
         assert_eq!(slot.size(), 8192);
     }
 
     #[test]
     fn init_pool_default_config_has_one_tier() {
-        // Use a local TieredPool (not the global) to avoid contaminating test state.
-        let pool = TieredPool::new(TieredPoolConfig::default()).unwrap();
+        // Inspect the global pool (already initialised by other tests).
+        let pool = global_pool();
         assert_eq!(pool.tier_count(), 1);
         assert_eq!(pool.tier_slot_size(0), Some(DEFAULT_SLOT_SIZE));
         assert_eq!(pool.max_slab_slot_size(), DEFAULT_SLOT_SIZE);
@@ -595,8 +577,7 @@ mod tests {
 
     #[test]
     fn tiered_pool_config_validates_ascending() {
-        // Duplicate tier sizes should be deduped, not rejected.
-        // The resulting pool should have 1 tier, not 2.
+        // Dedup test: no PoolSlots acquired, so local pool is safe.
         let pool = TieredPool::new(TieredPoolConfig {
             tier_sizes: vec![32, 32],
         })
@@ -612,5 +593,14 @@ mod tests {
             tier_sizes: vec![too_large],
         });
         assert!(err.is_err(), "slot size > page_size/3 must be rejected");
+    }
+
+    #[test]
+    fn local_pool_coffer_view_works() {
+        // Verify coffer_view on the global pool; all slab PoolSlots must come from global_pool.
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = coffer_view().unwrap();
+        assert_eq!(slot.size(), DEFAULT_SLOT_SIZE);
+        assert_eq!(slot.tier_index(), Some(0));
     }
 }
