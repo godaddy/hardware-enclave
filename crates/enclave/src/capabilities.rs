@@ -38,8 +38,12 @@ fn check_entitlement_macos(group: &str) -> bool {
         Ok(e) => e,
         Err(_) => return false,
     };
-    // codesign -d --entitlements - writes the plist to stderr on older macOS.
-    let output = std::process::Command::new("codesign")
+    // Use absolute path to avoid PATH manipulation.
+    // NOTE: `is_binary_signed()` in enclaveapp_core::signing also invokes
+    // `codesign --verify` but in a different crate. That invocation should
+    // similarly be updated to use an absolute path — tracked as a follow-up
+    // in enclaveapp-core (out of scope here per constraint 4).
+    let output = std::process::Command::new("/usr/bin/codesign")
         .args(["-d", "--entitlements", "-", "--xml"])
         .arg(&exe)
         .output();
@@ -132,4 +136,35 @@ fn detect_backend() -> BackendKind {
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     BackendKind::Keyring
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_binary_signed_returns_false_in_cargo_test() {
+        // cargo test runs from /target/ so is_binary_signed() must return false.
+        assert!(!is_binary_signed());
+    }
+
+    #[test]
+    fn has_keychain_entitlement_returns_false_for_unknown_group() {
+        // An unsigned test binary never has any keychain entitlement.
+        assert!(!has_keychain_entitlement("com.example.nonexistent.group"));
+    }
+
+    #[test]
+    fn security_capabilities_does_not_panic() {
+        let caps = security_capabilities("testapp");
+        assert!(!caps.effective_app_name.is_empty());
+        // In test context, binary is unsigned → -unsigned suffix applied
+        assert!(
+            caps.effective_app_name.ends_with("-unsigned"),
+            "unsigned binary should have -unsigned suffix, got: {}",
+            caps.effective_app_name
+        );
+        assert!(!caps.binary_signed);
+    }
 }

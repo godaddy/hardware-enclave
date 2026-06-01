@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use enclaveapp_core::metadata::{atomic_write, compute_meta_hmac_bytes};
+use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
@@ -58,8 +59,15 @@ impl TamperEvidentHandle {
         Ok(())
     }
 
-    /// Read `path` and verify its HMAC sidecar.
+    /// Read `path`, verify its HMAC against the trust anchor, and return the content.
+    ///
     /// Returns `Error::TamperDetected` if the HMAC doesn't match.
+    ///
+    /// **Fail-open cases:** If no sidecar exists (`VerifyOutcome::Legacy`) or the
+    /// platform secure store is unavailable (`VerifyOutcome::StoreUnavailable`),
+    /// verification is skipped and the file contents are returned unverified.
+    /// Use [`verify()`] explicitly and check the outcome if your threat model
+    /// requires fail-closed behavior.
     pub fn read(&self, path: &Path) -> Result<Vec<u8>> {
         if !path.exists() {
             return Err(Error::KeyNotFound {
@@ -88,9 +96,8 @@ impl TamperEvidentHandle {
         if !path.exists() {
             return Ok(VerifyOutcome::NotFound);
         }
-        let key = match &self.hmac_key {
-            Some(k) => k,
-            None => return Ok(VerifyOutcome::StoreUnavailable),
+        let Some(key) = &self.hmac_key else {
+            return Ok(VerifyOutcome::StoreUnavailable);
         };
         let sidecar = sidecar_path(path);
         if !sidecar.exists() {
@@ -100,18 +107,22 @@ impl TamperEvidentHandle {
         let stored_hex = std::fs::read_to_string(&sidecar).map_err(Error::Io)?;
         let stored_hex = stored_hex.trim();
 
-        let computed = compute_meta_hmac_bytes(key.as_slice(), &content);
-        let computed_hex = bytes_to_hex(&computed);
-
-        // Constant-time comparison.
-        if stored_hex.len() != computed_hex.len() {
+        // Decode stored hex to raw bytes (structural check, not secret comparison).
+        if stored_hex.len() != 64 {
             return Ok(VerifyOutcome::Tamper);
         }
-        let mut diff: u8 = 0;
-        for (a, b) in stored_hex.bytes().zip(computed_hex.bytes()) {
-            diff |= a ^ b;
+        let mut stored_bytes = [0_u8; 32];
+        for (i, chunk) in stored_hex.as_bytes().chunks(2).enumerate() {
+            let hex_str = std::str::from_utf8(chunk)
+                .map_err(|_| Error::Config("invalid sidecar hex".into()))?;
+            stored_bytes[i] = u8::from_str_radix(hex_str, 16)
+                .map_err(|_| Error::Config("invalid sidecar hex".into()))?;
         }
-        if diff == 0 {
+
+        let computed: [u8; 32] = compute_meta_hmac_bytes(key.as_slice(), &content);
+
+        // Constant-time comparison using the `subtle` crate.
+        if computed.ct_eq(&stored_bytes).into() {
             Ok(VerifyOutcome::Match)
         } else {
             Ok(VerifyOutcome::Tamper)
@@ -167,4 +178,116 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
         s.push(HEX[lo] as char);
     }
     s
+}
+
+#[cfg(test)]
+impl TamperEvidentHandle {
+    fn with_key(app_name: &str, key: Vec<u8>) -> Self {
+        Self {
+            app_name: app_name.into(),
+            hmac_key: Some(Zeroizing::new(key)),
+        }
+    }
+    fn without_key(app_name: &str) -> Self {
+        Self {
+            app_name: app_name.into(),
+            hmac_key: None,
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn write_and_verify_match() {
+        let dir = TempDir::new().unwrap();
+        let handle = TamperEvidentHandle::with_key("test", vec![0x42_u8; 32]);
+        let path = dir.path().join("file.txt");
+        handle.write(&path, b"hello").unwrap();
+        assert_eq!(handle.verify(&path).unwrap(), VerifyOutcome::Match);
+    }
+
+    #[test]
+    fn tampered_file_detected() {
+        let dir = TempDir::new().unwrap();
+        let handle = TamperEvidentHandle::with_key("test", vec![0x42_u8; 32]);
+        let path = dir.path().join("file.txt");
+        handle.write(&path, b"hello").unwrap();
+        // Overwrite file directly, bypassing the API
+        fs::write(&path, b"tampered").unwrap();
+        assert_eq!(handle.verify(&path).unwrap(), VerifyOutcome::Tamper);
+    }
+
+    #[test]
+    fn read_tampered_file_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let handle = TamperEvidentHandle::with_key("test", vec![0x42_u8; 32]);
+        let path = dir.path().join("file.txt");
+        handle.write(&path, b"hello").unwrap();
+        fs::write(&path, b"tampered").unwrap();
+        let result = handle.read(&path);
+        assert!(matches!(result, Err(Error::TamperDetected { .. })));
+    }
+
+    #[test]
+    fn missing_sidecar_is_legacy() {
+        let dir = TempDir::new().unwrap();
+        let handle = TamperEvidentHandle::with_key("test", vec![0x42_u8; 32]);
+        let path = dir.path().join("file.txt");
+        fs::write(&path, b"legacy").unwrap();
+        // No sidecar written
+        assert_eq!(handle.verify(&path).unwrap(), VerifyOutcome::Legacy);
+    }
+
+    #[test]
+    fn store_unavailable_returns_correct_outcome() {
+        let handle = TamperEvidentHandle::without_key("test");
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("file.txt");
+        fs::write(&path, b"content").unwrap();
+        // Write a fake sidecar to avoid Legacy outcome
+        fs::write(dir.path().join("file.txt.hmac"), b"fakehex").unwrap();
+        assert_eq!(
+            handle.verify(&path).unwrap(),
+            VerifyOutcome::StoreUnavailable
+        );
+    }
+
+    #[test]
+    fn migrate_creates_valid_sidecar() {
+        let dir = TempDir::new().unwrap();
+        let handle = TamperEvidentHandle::with_key("test", vec![0x42_u8; 32]);
+        let path = dir.path().join("file.txt");
+        fs::write(&path, b"existing content").unwrap();
+        // No sidecar yet
+        assert_eq!(handle.verify(&path).unwrap(), VerifyOutcome::Legacy);
+        handle.migrate(&path).unwrap();
+        // Now sidecar exists and verifies
+        assert_eq!(handle.verify(&path).unwrap(), VerifyOutcome::Match);
+    }
+
+    #[test]
+    fn truncated_sidecar_is_tamper() {
+        let dir = TempDir::new().unwrap();
+        let handle = TamperEvidentHandle::with_key("test", vec![0x42_u8; 32]);
+        let path = dir.path().join("file.txt");
+        handle.write(&path, b"hello").unwrap();
+        // Truncate sidecar to wrong length
+        let sidecar = dir.path().join("file.txt.hmac");
+        fs::write(&sidecar, b"tooshort").unwrap();
+        assert_eq!(handle.verify(&path).unwrap(), VerifyOutcome::Tamper);
+    }
+
+    #[test]
+    fn not_found_on_missing_file() {
+        let handle = TamperEvidentHandle::with_key("test", vec![0x42_u8; 32]);
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("nonexistent.txt");
+        assert_eq!(handle.verify(&path).unwrap(), VerifyOutcome::NotFound);
+    }
 }

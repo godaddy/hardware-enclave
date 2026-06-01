@@ -34,9 +34,14 @@ pub fn create_encryptor(config: &EnclaveConfig) -> Result<EncryptorHandle> {
 }
 
 /// Create an auth handle for the current platform.
+///
+/// The `config` parameter is accepted for API consistency with the other factory
+/// functions but is not currently used — `AuthHandle` only requires platform
+/// detection. It is reserved for Phase 2 when access-group entitlement validation
+/// will be wired in.
 pub fn create_auth(config: &EnclaveConfig) -> Result<AuthHandle> {
+    let _ = config; // reserved for Phase 2 entitlement validation
     let kind = resolve_backend_kind();
-    let _ = config;
     Ok(AuthHandle::new(kind))
 }
 
@@ -104,4 +109,46 @@ fn resolve_backend_kind() -> BackendKind {
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     BackendKind::Keyring
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_auth_does_not_panic() {
+        let config = EnclaveConfig::new("testapp", "default");
+        let _handle = create_auth(&config).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn user_presence_without_access_group_unsigned_returns_requires_signing() {
+        use crate::config::{MacOsConfig, PlatformConfig};
+        use std::time::Duration;
+        let config = EnclaveConfig {
+            app_name: "testapp".into(),
+            default_key_label: "key".into(),
+            access_policy: None,
+            keys_dir: None,
+            platform: PlatformConfig::MacOs(MacOsConfig {
+                wrapping_key_user_presence: true,
+                wrapping_key_cache_ttl: Duration::ZERO,
+                keychain_access_group: None,
+                extra_bridge_paths: Vec::new(),
+            }),
+        };
+        // In test env the binary is unsigned, so this must return RequiresSigning.
+        let result = create_signer(&config);
+        assert!(
+            result.is_err(),
+            "unsigned binary with user_presence must return an error"
+        );
+        assert!(
+            matches!(result, Err(Error::RequiresSigning { .. })),
+            "expected RequiresSigning, got: {:?}",
+            result
+        );
+    }
 }

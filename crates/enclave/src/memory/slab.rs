@@ -63,7 +63,9 @@ pub struct SecureSlab {
     transient: HashSet<usize>,
 }
 
-// Safety: exclusive ownership of the allocation; all access is through &mut or Mutex.
+// SAFETY: SecureSlab has exclusive ownership of its mlock'd allocation (NonNull<u8>).
+// All mutation is through &mut self, enforced by callers via Mutex<SecureSlab>.
+// The raw pointer has no thread-local invariants — it is a plain mmap/VirtualAlloc region.
 unsafe impl Send for SecureSlab {}
 
 impl std::fmt::Debug for SecureSlab {
@@ -86,6 +88,11 @@ impl SecureSlab {
     /// key material and are permanently reserved (not included in free/cache/transient).
     pub fn new(slot_size: usize, init_coffer: bool) -> Result<Self> {
         let ps = page_size();
+        if init_coffer && slot_size < 32 {
+            return Err(Error::Memory(format!(
+                "SecureSlab: coffer requires slot_size >= 32 (AES-256 key size), got {slot_size}"
+            )));
+        }
         if slot_size == 0 || slot_size > ps / 3 {
             return Err(Error::Memory(format!(
                 "SecureSlab: slot_size {slot_size} is invalid (must be 1..={})",
@@ -140,6 +147,8 @@ impl SecureSlab {
     fn init_coffer_slots(&mut self) -> Result<()> {
         // Fill slot 1 (right) with random bytes.
         let right_ptr = self.slot_ptr(COFFER_RIGHT);
+        // SAFETY: COFFER_RIGHT (1) is always a valid slot index (total_slots >= 3 is
+        // asserted at construction). The pointer stays within the mlock'd page allocation.
         unsafe {
             let right = std::slice::from_raw_parts_mut(right_ptr, self.slot_size);
             rand::rngs::OsRng
@@ -148,44 +157,60 @@ impl SecureSlab {
         }
 
         // Generate a temporary master key (NOT written to slot 0 directly).
-        let mut master_key = vec![0_u8; self.slot_size];
+        let mut master_key = zeroize::Zeroizing::new(vec![0_u8; self.slot_size]);
         rand::rngs::OsRng
             .try_fill_bytes(&mut master_key)
             .map_err(|e| Error::Memory(format!("SecureSlab coffer master_key OsRng: {e}")))?;
 
         // Compute h = SHA-256(right), XOR into slot 0.
+        // h is wrapped in Zeroizing so the hash is scrubbed on scope exit.
+        // SAFETY: COFFER_RIGHT (1) and COFFER_LEFT (0) are always valid slot indices
+        // (total_slots >= 3 is asserted at construction). All pointer arithmetic stays
+        // within the single mlock'd page allocation.
         unsafe {
             let right = std::slice::from_raw_parts(right_ptr, self.slot_size);
-            let h: [u8; 32] = Sha256::digest(right).into();
+            let mut h = zeroize::Zeroizing::new([0_u8; 32]);
+            let digest: [u8; 32] = Sha256::digest(right).into();
+            h.copy_from_slice(&digest);
             let left = std::slice::from_raw_parts_mut(self.slot_ptr(COFFER_LEFT), self.slot_size);
             for i in 0..self.slot_size {
                 left[i] = master_key[i] ^ h[i % 32];
             }
+            // h and master_key are zeroized on drop automatically.
         }
-
-        // Zeroize the temporary master key immediately.
-        master_key.zeroize();
 
         Ok(())
     }
 
     /// Raw pointer for slot `index`.
     fn slot_ptr(&self, index: usize) -> *mut u8 {
-        // Safety: index * slot_size is within [0, page_size) because
-        // index < total_slots == page_size / slot_size.
+        debug_assert!(
+            index < self.total_slots,
+            "slot index {index} out of range (total={})",
+            self.total_slots
+        );
+        // SAFETY: index < total_slots (debug_assert above). slot_size * total_slots == page_size
+        // (ensured at construction), so the pointer stays within the mlock'd allocation.
         unsafe { self.ptr.as_ptr().add(index * self.slot_size) }
     }
 
     /// Zeroize the contents of slot `index`.
     fn wipe_slot(&self, index: usize) {
+        // SAFETY: index is always < total_slots (validated by callers); slot_ptr arithmetic
+        // stays within the mlock'd slab page allocation which lives for the process lifetime.
         unsafe {
             std::slice::from_raw_parts_mut(self.slot_ptr(index), self.slot_size).zeroize();
         }
     }
 
-    /// Raw pointer + length for slot `index`. Only valid while `self` is alive.
-    pub fn slot_raw(&self, index: usize) -> (*mut u8, usize) {
-        (self.slot_ptr(index), self.slot_size)
+    /// Raw pointer + length for slot `index`.
+    ///
+    /// Returns `None` if `index >= total_slots`. Only valid while `self` is alive.
+    pub fn slot_raw(&self, index: usize) -> Option<(*mut u8, usize)> {
+        if index >= self.total_slots {
+            return None;
+        }
+        Some((self.slot_ptr(index), self.slot_size))
     }
 
     /// Slot size in bytes.
@@ -338,14 +363,23 @@ impl SecureSlab {
             "SecureSlab::coffer_view called on non-coffer slab"
         );
         let out_idx = self.acquire_transient()?;
+        // SAFETY: COFFER_LEFT (0) and COFFER_RIGHT (1) are always valid slot indices
+        // (total_slots >= 3 is asserted at construction). out_idx is a checked-out transient
+        // slot index obtained from acquire_transient(), which only returns indices in
+        // FIRST_SHARED_SLOT..total_slots. All three pointer calculations stay within
+        // the single mlock'd page allocation.
         unsafe {
             let left = std::slice::from_raw_parts(self.slot_ptr(COFFER_LEFT), self.slot_size);
             let right = std::slice::from_raw_parts(self.slot_ptr(COFFER_RIGHT), self.slot_size);
-            let h: [u8; 32] = Sha256::digest(right).into();
+            // Wrap the hash in Zeroizing so it is scrubbed on scope exit.
+            let mut h = zeroize::Zeroizing::new([0_u8; 32]);
+            let digest: [u8; 32] = Sha256::digest(right).into();
+            h.copy_from_slice(&digest);
             let out = std::slice::from_raw_parts_mut(self.slot_ptr(out_idx), self.slot_size);
             for i in 0..self.slot_size {
                 out[i] = left[i] ^ h[i % 32];
             }
+            // h is zeroized on drop automatically.
         }
         Some(out_idx)
     }
@@ -359,8 +393,10 @@ impl SecureSlab {
 
 impl Drop for SecureSlab {
     fn drop(&mut self) {
-        // Zeroize entire page before releasing.
-        // Safety: ptr is valid for page_size bytes; restore write access first.
+        // SAFETY: ptr is valid for page_size bytes for the entire lifetime of this
+        // struct (allocated in new(), freed here). Restoring write access first
+        // ensures the subsequent zeroize and free calls succeed even if the page
+        // was left in a ReadOnly or NoAccess state.
         unsafe {
             drop(os_protect(
                 self.ptr.as_ptr(),
@@ -399,6 +435,45 @@ mod tests {
     }
 
     #[test]
+    fn coffer_slot_size_too_small_rejected() {
+        // BLK-7: slot_size < 32 with init_coffer=true should fail.
+        let result = SecureSlab::new(16, true);
+        assert!(
+            result.is_err(),
+            "coffer requires slot_size >= 32 (AES-256 key size)"
+        );
+    }
+
+    #[test]
+    fn slot_raw_out_of_bounds_returns_none() {
+        let slab = SecureSlab::new(DEFAULT_SLOT_SIZE, false).unwrap();
+        assert!(slab.slot_raw(slab.total_slots()).is_none());
+        assert!(slab.slot_raw(usize::MAX).is_none());
+    }
+
+    #[test]
+    fn coffer_view_result_is_deterministic() {
+        let mut slab = SecureSlab::new(DEFAULT_SLOT_SIZE, true).unwrap();
+        let idx1 = slab.coffer_view().unwrap();
+        let (ptr1, len1) = slab
+            .slot_raw(idx1)
+            .expect("slot_raw: index from coffer_view");
+        let key1 = unsafe { std::slice::from_raw_parts(ptr1, len1) }.to_vec();
+        slab.release(idx1);
+        let idx2 = slab.coffer_view().unwrap();
+        let (ptr2, len2) = slab
+            .slot_raw(idx2)
+            .expect("slot_raw: index from coffer_view");
+        let key2 = unsafe { std::slice::from_raw_parts(ptr2, len2) }.to_vec();
+        slab.release(idx2);
+        assert_eq!(
+            key1, key2,
+            "coffer_view must reconstruct the same key each time"
+        );
+        assert!(key1.iter().any(|&b| b != 0), "key must not be all zeros");
+    }
+
+    #[test]
     fn acquire_and_release() {
         let mut slab = SecureSlab::new(DEFAULT_SLOT_SIZE, false).unwrap();
         let idx = slab.acquire_transient().unwrap();
@@ -420,9 +495,12 @@ mod tests {
     #[test]
     fn out_of_range_slot_raw_is_safe() {
         let slab = SecureSlab::new(DEFAULT_SLOT_SIZE, false).unwrap();
-        // slot_raw does no bounds check — we just verify it returns consistent offsets.
-        let (p0, _) = slab.slot_raw(0);
-        let (p1, _) = slab.slot_raw(1);
+        // Out-of-bounds indices now return None.
+        assert!(slab.slot_raw(slab.total_slots()).is_none());
+        assert!(slab.slot_raw(usize::MAX).is_none());
+        // In-bounds indices return Some with consistent offsets.
+        let (p0, _) = slab.slot_raw(0).expect("slot 0 is valid");
+        let (p1, _) = slab.slot_raw(1).expect("slot 1 is valid");
         assert_eq!(unsafe { p1.offset_from(p0) } as usize, DEFAULT_SLOT_SIZE);
     }
 
@@ -449,7 +527,9 @@ mod tests {
         let data = [0x42_u8; DEFAULT_SLOT_SIZE];
         assert!(slab.cache_insert(42, &data));
         let slot_idx = slab.cache_get(42).unwrap();
-        let (ptr, len) = slab.slot_raw(slot_idx);
+        let (ptr, len) = slab
+            .slot_raw(slot_idx)
+            .expect("slot_raw: index validated by cache_get");
         let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
         assert_eq!(slice, &data);
         slab.release(slot_idx);
@@ -477,12 +557,16 @@ mod tests {
         let mut slab = SecureSlab::new(DEFAULT_SLOT_SIZE, true).unwrap();
         // Call coffer_view twice; both results should be identical (deterministic).
         let idx1 = slab.coffer_view().unwrap();
-        let (ptr1, len1) = slab.slot_raw(idx1);
+        let (ptr1, len1) = slab
+            .slot_raw(idx1)
+            .expect("slot_raw: index from coffer_view is valid");
         let key1 = unsafe { std::slice::from_raw_parts(ptr1, len1) }.to_vec();
         slab.release(idx1);
 
         let idx2 = slab.coffer_view().unwrap();
-        let (ptr2, len2) = slab.slot_raw(idx2);
+        let (ptr2, len2) = slab
+            .slot_raw(idx2)
+            .expect("slot_raw: index from coffer_view is valid");
         let key2 = unsafe { std::slice::from_raw_parts(ptr2, len2) }.to_vec();
         slab.release(idx2);
 

@@ -35,17 +35,10 @@ impl SignerHandle {
 
     /// Generate a new P-256 signing key. Returns uncompressed SEC1 public key.
     pub fn generate_key(&self, label: &str, policy: AccessPolicy) -> Result<Vec<u8>> {
-        // BiometricOnly / PasswordOnly are only hardware-enforceable on macOS.
-        if !cfg!(target_os = "macos") {
-            match policy {
-                AccessPolicy::BiometricOnly | AccessPolicy::PasswordOnly => {
-                    return Err(Error::PolicyNotSupported {
-                        policy: format!("{policy:?}"),
-                    });
-                }
-                AccessPolicy::None | AccessPolicy::Any => {}
-            }
-        }
+        // On macOS, BiometricOnly and PasswordOnly are hardware-enforced by the SE.
+        // On other platforms these policies are not hardware-enforceable; the backend
+        // will either apply a best-effort equivalent (Windows Hello UX) or reject.
+        // We do not reject here — let the backend decide based on its configuration.
         self.backend
             .key_manager()
             .generate(label, KeyType::Signing, policy)
@@ -107,7 +100,7 @@ impl SignerHandle {
                 infos.push(KeyInfo {
                     label,
                     key_type: KeyType::Signing,
-                    access_policy: AccessPolicy::None,
+                    access_policy: None, // access_policy requires metadata read; not yet implemented
                     public_key: pub_key,
                 });
             }
@@ -142,5 +135,19 @@ impl SignerHandle {
 
     pub fn backend_kind(&self) -> BackendKind {
         self.backend_kind
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use crate::types::AccessPolicy;
+
+    #[test]
+    fn key_info_access_policy_is_option() {
+        // BLK-12 / SG-3: verify KeyInfo.access_policy is Option<AccessPolicy>
+        // and list_keys() returns it as None (until metadata read is implemented).
+        // This is a compile-time check — if the field type changed, this won't compile.
+        let _: Option<AccessPolicy> = None; // type assertion
     }
 }

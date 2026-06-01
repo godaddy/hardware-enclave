@@ -14,8 +14,17 @@ pub use enclaveapp_app_adapter::IntegrationType;
 
 /// Launch a child process with hardware-backed secrets injected.
 ///
-/// Secret env var values are mlocked before spawn and zeroized after the child exits.
-/// The child inherits RLIMIT_CORE=0 on Unix (no core dumps with secret env).
+/// The [`run()`][SecureProcess::run] method provides full security guarantees:
+/// - Secret env var values are mlocked before spawn and zeroized after the child exits.
+/// - The spawned child inherits `RLIMIT_CORE=0` on Unix (preventing core dumps of the
+///   secret-laden environment).
+///
+/// The [`exec()`][SecureProcess::exec] method provides **weaker** guarantees:
+/// - Secrets are NOT mlocked (they are passed via `Command::env` without locking).
+/// - Secrets are NOT zeroized (the current process is replaced; no cleanup runs).
+/// - Prefer [`run()`][SecureProcess::run] for Type 2 secret delivery. Use
+///   [`exec()`][SecureProcess::exec] only when you need to replace the current
+///   process image and accept the weaker guarantees.
 pub struct SecureProcess {
     program: PathBuf,
     args: Vec<OsString>,

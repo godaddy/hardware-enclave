@@ -33,24 +33,32 @@ impl AuthHandle {
         platform_auth_capabilities()
     }
 
-    /// Request user-presence verification. Returns Ok(()) if granted.
+    /// Request user-presence verification. Returns `Ok(())` if granted.
     /// `reason` is shown in the OS prompt.
     ///
-    /// Note: in the current implementation, presence is enforced per-operation
-    /// via sign_with_presence(). Standalone presence acquisition will be
-    /// fully implemented in Phase 2.
+    /// **Phase 2 stub.** Standalone presence acquisition (separate from
+    /// per-operation `sign_with_presence`) requires LAContext/UserConsentVerifier
+    /// integration not yet implemented. Returns `Error::NotImplemented` so that
+    /// callers cannot silently treat this as a success.
     pub fn request_presence(&self, _reason: &str) -> Result<()> {
         if !self.capabilities().biometric_available {
             return Err(Error::PresenceNotAvailable);
         }
-        // Phase 2: integrate LAContext/UserConsentVerifier standalone flow.
-        Ok(())
+        // Standalone presence acquisition (separate from per-operation sign_with_presence)
+        // requires LAContext/UserConsentVerifier integration, implemented in Phase 2.
+        // Return a distinct error so callers cannot accidentally treat this as success.
+        Err(Error::NotImplemented {
+            feature:
+                "standalone request_presence — use sign_with_presence for per-operation presence"
+                    .into(),
+        })
     }
 
-    /// Evict any cached presence token. No-op on platforms without caching.
-    pub fn evict_presence_cache(&self) {
-        // No-op until Phase 2 integrates standalone LAContext management.
-    }
+    /// Evict any cached presence token.
+    ///
+    /// **Phase 2 stub.** This is a no-op until standalone LAContext/UserConsentVerifier
+    /// integration is complete. Callers should not rely on this method for security enforcement.
+    pub fn evict_presence_cache(&self) {}
 
     pub fn backend_kind(&self) -> BackendKind {
         self.backend_kind
@@ -85,5 +93,35 @@ pub fn platform_auth_capabilities() -> AuthCapabilities {
         password_available: false,
         presence_caching: false,
         authenticator_name: None,
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::types::BackendKind;
+
+    #[test]
+    fn request_presence_returns_not_implemented_when_available() {
+        // On macOS in test env, biometric_available may be false (no Touch ID in CI).
+        // Either way, request_presence must NOT return Ok(()).
+        let handle = AuthHandle::new(BackendKind::SecureEnclave);
+        let result = handle.request_presence("test reason");
+        // Must return an error — either PresenceNotAvailable or NotImplemented.
+        // Must never return Ok(()) (which would be a false success).
+        assert!(
+            result.is_err(),
+            "request_presence must not return Ok(()) — it is a stub"
+        );
+    }
+
+    #[test]
+    fn platform_auth_capabilities_does_not_panic() {
+        let caps = platform_auth_capabilities();
+        // Just verify it returns without panicking
+        let _ = caps.biometric_available;
+        let _ = caps.password_available;
+        let _ = caps.presence_caching;
     }
 }

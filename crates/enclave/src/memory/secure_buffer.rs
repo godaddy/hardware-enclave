@@ -66,7 +66,10 @@ impl SecureBuffer {
         let alloc_ptr = unsafe { os_alloc(alloc_len) }
             .map_err(|e| Error::Memory(format!("SecureBuffer::new alloc: {e}")))?;
 
-        // Inner region starts after first guard page.
+        // SAFETY: alloc_ptr is a freshly allocated page from os_alloc. The offset ps is
+        // exactly one page, which is within the multi-page allocation
+        // (alloc_len = ps + inner_rounded + ps). The pointer is non-null because os_alloc
+        // returns NonNull and we are adding a positive, in-bounds offset.
         let inner_ptr = unsafe { NonNull::new_unchecked(alloc_ptr.as_ptr().add(ps)) };
 
         // Generate random canaries.
@@ -131,6 +134,10 @@ impl SecureBuffer {
             self.state == State::Mutable,
             "SecureBuffer: bytes() called in non-mutable state"
         );
+        // SAFETY: state == Mutable ensures the inner region has PROT_READ|WRITE. inner_ptr
+        // was set at construction to alloc_ptr + page_size, which is within alloc_len.
+        // inner_len is the caller-requested size, <= inner_rounded which is within alloc_len.
+        // &mut self guarantees no aliasing.
         unsafe { std::slice::from_raw_parts_mut(self.inner_ptr.as_ptr(), self.inner_len) }
     }
 
@@ -140,6 +147,10 @@ impl SecureBuffer {
             self.state != State::Dead,
             "SecureBuffer: as_slice() on dead buffer"
         );
+        // SAFETY: state != Dead ensures the allocation is still live. inner_ptr
+        // was set at construction to alloc_ptr + page_size, within alloc_len.
+        // If state == Frozen the protection is ReadOnly, which permits reads.
+        // If state == Mutable the protection is ReadWrite, which also permits reads.
         unsafe { std::slice::from_raw_parts(self.inner_ptr.as_ptr(), self.inner_len) }
     }
 
@@ -256,10 +267,18 @@ impl SecureBuffer {
     }
 }
 
+#[allow(clippy::panic)]
 impl Drop for SecureBuffer {
     fn drop(&mut self) {
         if let Err(e) = self.destroy() {
-            tracing::warn!(error = %e, "SecureBuffer::drop: destroy failed");
+            // A canary corruption means a buffer overflow has occurred — the process
+            // memory may be in an unsafe state. Log at error level.
+            tracing::error!(error = %e, "SecureBuffer canary corruption detected — possible buffer overflow");
+            // In debug/test builds, panic to make the violation visible.
+            // clippy::panic is intentional: a corrupted canary in Drop is a
+            // security-critical event that must not be silenced in debug builds.
+            #[cfg(debug_assertions)]
+            panic!("SecureBuffer canary corrupted: {e}");
         }
     }
 }

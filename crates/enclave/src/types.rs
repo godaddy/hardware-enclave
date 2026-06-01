@@ -9,7 +9,11 @@ pub use enclaveapp_core::types::{AccessPolicy, KeyType, PresenceMode};
 pub struct KeyInfo {
     pub label: String,
     pub key_type: KeyType,
-    pub access_policy: AccessPolicy,
+    /// The key's access policy, if it could be determined.
+    /// `None` means the policy was not available (e.g., metadata read failed or
+    /// the backend does not expose policy metadata via `list_keys()`). Callers
+    /// must check for `None` and not assume a default policy.
+    pub access_policy: Option<AccessPolicy>,
     /// Uncompressed SEC1 public key (0x04 || X || Y, 65 bytes).
     pub public_key: Vec<u8>,
 }

@@ -40,6 +40,14 @@ pub enum Error {
     /// requested but the platform has no user-presence support.
     #[error("user presence is not available on this platform")]
     PresenceNotAvailable,
+    /// The requested feature is not yet implemented. Check the feature string for guidance.
+    #[error("not implemented: {feature}")]
+    NotImplemented { feature: String },
+    /// The key's stored access policy does not match the requested policy.
+    /// This typically indicates the key was generated with a different policy
+    /// and should be regenerated.
+    #[error("access policy mismatch: {detail}")]
+    PolicyMismatch { detail: String },
     #[error("config error: {0}")]
     Config(String),
     #[error("I/O error: {0}")]
@@ -95,14 +103,47 @@ impl From<enclaveapp_app_storage::StorageError> for Error {
                 detail: s,
             },
             SE::KeyNotFound(s) => Error::KeyNotFound { label: s },
-            SE::PolicyMismatch(s) => Error::KeyOperation {
-                operation: "policy_check".into(),
-                detail: s,
-            },
+            SE::PolicyMismatch(s) => Error::PolicyMismatch { detail: s },
             SE::PlatformError(s) => Error::KeyOperation {
                 operation: "platform".into(),
                 detail: s,
             },
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use enclaveapp_app_storage::StorageError;
+
+    #[test]
+    fn from_storage_error_policy_mismatch_preserves_detail() {
+        let e: Error = StorageError::PolicyMismatch("None vs BiometricOnly".into()).into();
+        match e {
+            Error::PolicyMismatch { detail } => {
+                assert!(detail.contains("BiometricOnly"));
+            }
+            other => panic!("expected PolicyMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_storage_error_all_variants_convert() {
+        // Verify none of the conversions panic
+        let variants: Vec<StorageError> = vec![
+            StorageError::NotAvailable,
+            StorageError::EncryptionFailed("e".into()),
+            StorageError::DecryptionFailed("d".into()),
+            StorageError::SigningFailed("s".into()),
+            StorageError::KeyInitFailed("k".into()),
+            StorageError::KeyNotFound("n".into()),
+            StorageError::PolicyMismatch("p".into()),
+            StorageError::PlatformError("pl".into()),
+        ];
+        for v in variants {
+            drop(Error::from(v));
         }
     }
 }

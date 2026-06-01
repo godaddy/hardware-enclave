@@ -36,12 +36,22 @@ enum PoolSlotOrigin {
 /// which lives in a `OnceLock<TieredPool>` and is never dropped for the
 /// process lifetime. The pointer therefore cannot dangle as long as the
 /// process is alive.
+///
+/// # Safety
+/// `PoolSlot` must not outlive the global pool. Only acquire via the module-level
+/// `pool_acquire()` and `coffer_view()` functions, not via a local `TieredPool` instance.
+/// The `TieredPool::acquire()` method is intentionally `pub(crate)` for this reason.
 pub struct PoolSlot {
     ptr: *mut u8,
     len: usize,
     origin: PoolSlotOrigin,
 }
 
+// SAFETY: PoolSlot owns either:
+// (a) a slab slot index — the underlying memory is the global slab (OnceLock, process-lifetime).
+//     The raw pointer is valid for the process lifetime. No thread-local state.
+// (b) a standalone SecureBuffer — which is itself Send.
+// PoolSlot is NOT Sync because concurrent mutable access to the same slot is not protected.
 unsafe impl Send for PoolSlot {}
 
 impl std::fmt::Debug for PoolSlot {
@@ -81,14 +91,16 @@ impl PoolSlot {
 
     /// Mutable access to the slot's bytes.
     pub fn bytes(&mut self) -> &mut [u8] {
-        // Safety: ptr is valid for len bytes (either in global slab or standalone buf).
+        // SAFETY: ptr is valid for len bytes (either in the global OnceLock slab, which is
+        // process-lifetime, or in the standalone SecureBuffer owned by this PoolSlot).
+        // &mut self guarantees exclusive access — PoolSlot is not Sync.
         unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
     }
 
     /// Read-only access to the slot's bytes.
     pub fn as_slice(&self) -> &[u8] {
-        // Safety: ptr is valid for len bytes; no aliased mutable reference exists
-        // because PoolSlot is not Sync.
+        // SAFETY: ptr is valid for len bytes; no aliased mutable reference exists
+        // because PoolSlot is not Sync and we hold a shared reference.
         unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
     }
 
@@ -124,7 +136,9 @@ impl Drop for PoolSlot {
                 slot_index,
             } => {
                 // Zeroize before acquiring the lock so memory is clean even under contention.
-                // Safety: ptr points into the global TieredPool's slab page which is alive.
+                // SAFETY: ptr points into the global TieredPool's slab page (OnceLock,
+                // process-lifetime). The PoolSlot doc requires slots to come from global_pool(),
+                // so this pointer is always valid for the process lifetime.
                 unsafe {
                     use zeroize::Zeroize;
                     std::slice::from_raw_parts_mut(self.ptr, self.len).zeroize();
@@ -139,7 +153,8 @@ impl Drop for PoolSlot {
             PoolSlotOrigin::Standalone(buf) => {
                 // Zeroize before buf's own drop, which also zeroizes.
                 drop(buf.melt());
-                // Safety: ptr points into buf's inner region which is still alive.
+                // SAFETY: ptr points into buf's inner region (the SecureBuffer owned by this
+                // PoolSlot). buf is still alive at this point — we haven't dropped it yet.
                 unsafe {
                     use zeroize::Zeroize;
                     std::slice::from_raw_parts_mut(self.ptr, self.len).zeroize();
@@ -201,8 +216,10 @@ pub struct TieredPool {
     tiers: Vec<Tier>,
 }
 
-// Safety: TieredPool contains Mutex<SecureSlab> (which contains raw pointers).
-// All pointer access is through Mutex guards; there is no unguarded shared mutable state.
+// SAFETY: TieredPool contains Vec<Tier> where Tier holds Mutex<SecureSlab> (the slab's
+// NonNull<u8> is Send but not Sync by default). All mutable access to each slab is
+// serialized by its per-tier Mutex. The Condvar is Sync. There is no unguarded shared
+// mutable state.
 unsafe impl Send for TieredPool {}
 unsafe impl Sync for TieredPool {}
 
@@ -243,6 +260,14 @@ impl TieredPool {
             }
         }
 
+        // Tier 0's slab initialises the Coffer (AES-256 key). Its slot_size must be >= 32.
+        if sizes[0] < 32 {
+            return Err(Error::Memory(format!(
+                "TieredPool: first tier slot_size must be >= 32 for coffer, got {}",
+                sizes[0]
+            )));
+        }
+
         // Allocate one SecureSlab per tier.
         // Tier 0 initialises the Coffer; all others do not.
         let mut tiers = Vec::with_capacity(sizes.len());
@@ -269,7 +294,12 @@ impl TieredPool {
     /// Routes to the smallest tier whose slot_size >= `size`. Waits up to
     /// `SLOT_WAIT_TIMEOUT` for a free slot using a `Condvar` (no spin/sleep);
     /// falls back to a standalone `SecureBuffer` if exhausted or no tier fits.
-    pub fn acquire(&self, size: usize) -> Result<PoolSlot> {
+    ///
+    /// # Safety note
+    /// The returned `PoolSlot` contains a raw pointer into this pool's slab. It is
+    /// only safe to use when `self` is the global pool (i.e. called via `pool_acquire()`).
+    /// Do not call this on a local `TieredPool` instance and let the `PoolSlot` outlive it.
+    pub(crate) fn acquire(&self, size: usize) -> Result<PoolSlot> {
         if let Some(tier_idx) = self.tier_for_size(size) {
             let deadline = std::time::Instant::now() + SLOT_WAIT_TIMEOUT;
             let mut guard = self.tiers[tier_idx]
@@ -278,7 +308,9 @@ impl TieredPool {
                 .unwrap_or_else(|e| e.into_inner());
             loop {
                 if let Some(slot_idx) = guard.acquire_transient() {
-                    let (ptr, len) = guard.slot_raw(slot_idx);
+                    let (ptr, len) = guard
+                        .slot_raw(slot_idx)
+                        .expect("slot_raw: index validated by acquire_transient");
                     drop(guard);
                     return Ok(PoolSlot::from_slab(ptr, len, tier_idx, slot_idx));
                 }
@@ -305,12 +337,18 @@ impl TieredPool {
     }
 
     /// Reconstruct the Coffer master key from tier 0's slab into a `PoolSlot`.
-    pub fn coffer_view(&self) -> Result<PoolSlot> {
+    ///
+    /// # Safety note
+    /// Same lifetime constraint as `acquire()`: only safe when `self` is the global pool.
+    /// Use the module-level `coffer_view()` function instead of calling this directly.
+    pub(crate) fn coffer_view(&self) -> Result<PoolSlot> {
         let mut guard = self.tiers[0].slab.lock().unwrap_or_else(|e| e.into_inner());
         let slot_idx = guard
             .coffer_view()
             .ok_or_else(|| Error::Memory("coffer_view: no free slab slot".into()))?;
-        let (ptr, len) = guard.slot_raw(slot_idx);
+        let (ptr, len) = guard
+            .slot_raw(slot_idx)
+            .expect("slot_raw: index validated by coffer_view");
         drop(guard);
         Ok(PoolSlot::from_slab(ptr, len, 0, slot_idx))
     }
@@ -390,7 +428,8 @@ pub(super) fn hot_cache_get(id: u64) -> Option<PoolSlot> {
     let pool = global_pool();
     let mut guard = pool.tiers[0].slab.lock().unwrap_or_else(|e| e.into_inner());
     let slot_idx = guard.cache_get(id)?;
-    let (ptr, len) = guard.slot_raw(slot_idx);
+    // slot_idx was just returned by cache_get(), which only returns valid transient indices.
+    let (ptr, len) = guard.slot_raw(slot_idx)?;
     drop(guard);
     Some(PoolSlot::from_slab(ptr, len, 0, slot_idx))
 }
@@ -472,7 +511,9 @@ mod tests {
             }
         }
         if acquired.last() == Some(&slot_idx) {
-            let (ptr, _) = guard.slot_raw(slot_idx);
+            let (ptr, _) = guard
+                .slot_raw(slot_idx)
+                .expect("slot_raw: index just acquired from slab");
             let s = unsafe { std::slice::from_raw_parts(ptr, sz) };
             assert!(s.iter().all(|&b| b == 0), "slot must be zeroed after drop");
         }
@@ -602,5 +643,31 @@ mod tests {
         let slot = coffer_view().unwrap();
         assert_eq!(slot.size(), DEFAULT_SLOT_SIZE);
         assert_eq!(slot.tier_index(), Some(0));
+    }
+
+    // ── New tests for review findings ────────────────────────────────
+
+    #[test]
+    fn tiered_pool_first_tier_must_be_32_bytes() {
+        // BLK-7: first tier slot_size < 32 must be rejected (coffer requires AES-256 key size).
+        let result = TieredPool::new(TieredPoolConfig {
+            tier_sizes: vec![16],
+        });
+        assert!(
+            result.is_err(),
+            "first tier < 32 should fail (coffer requires slot_size >= 32)"
+        );
+    }
+
+    #[test]
+    fn coffer_view_key_is_32_bytes_and_nonzero() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = coffer_view().unwrap();
+        assert_eq!(slot.size(), 32);
+        // Key must not be all zeros (OsRng ran during slab init).
+        assert!(
+            slot.as_slice().iter().any(|&b| b != 0),
+            "coffer key must not be all zeros"
+        );
     }
 }

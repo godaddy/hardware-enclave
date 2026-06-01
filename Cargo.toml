@@ -85,9 +85,13 @@ keyring = { version = "3", features = ["sync-secret-service", "apple-native", "w
 
 # Security
 zeroize = { version = "1", features = ["zeroize_derive"] }
+subtle = "2"
 
 # Testing
 rand = "0.9"
+
+# Tracing
+tracing = "0.1"
 
 # Build support
 winresource = "0.1"

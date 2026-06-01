@@ -346,6 +346,8 @@ dependencies = [
  "libc",
  "rand",
  "sha2",
+ "subtle",
+ "tempfile",
  "thiserror",
  "tracing",
  "windows",

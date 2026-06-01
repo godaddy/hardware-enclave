@@ -31,16 +31,30 @@ fn unregister(id: usize) {
     }
 }
 
-/// Zeroize all live LockedBuffers. Call at process shutdown.
-pub fn zeroize_all_registered() {
+/// Zeroize the contents of all registered LockedBuffers.
+///
+/// **Call only at process shutdown.** Any LockedBuffer user still holding
+/// a reference after this call will read zeroed data. The buffers are not
+/// destroyed — they remain live with zeroed content until normal Drop runs.
+///
+/// # Panics (debug only)
+/// In debug builds, panics if any LockedBuffer has a strong reference count > 2
+/// at the time of the call (i.e. a caller outside the registry still holds a clone).
+pub fn zeroize_all_registered_at_shutdown() {
     if let Ok(r) = registry().lock() {
         for weak in r.values() {
             if let Some(arc) = weak.upgrade() {
+                // In debug mode, assert this is the only strong reference
+                // (registry holds one weak ref; the upgrade here is the second strong ref,
+                // so count == 2 means no external holders).
+                debug_assert!(
+                    Arc::strong_count(&arc) <= 2,
+                    "zeroize_all_registered_at_shutdown called while LockedBuffer still in use"
+                );
                 if let Ok(mut buf) = arc.lock() {
                     drop(buf.melt());
                     if buf.is_alive() {
                         buf.bytes().zeroize();
-                        // drop buf explicitly to handle the mutable borrow
                     }
                 }
             }
@@ -132,5 +146,44 @@ impl Drop for LockedBuffer {
     fn drop(&mut self) {
         unregister(self.id);
         self.wipe();
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zeroize_at_shutdown_does_not_panic_on_dead_weaks() {
+        // Create a buffer and drop it so the registry Weak becomes dead.
+        // zeroize_all_registered_at_shutdown() must be a no-op for dead Weaks.
+        let buf = LockedBuffer::new(32).unwrap();
+        // Write a known pattern via the inner lock.
+        {
+            let mut g = buf.inner.lock().unwrap_or_else(|e| e.into_inner());
+            g.bytes().fill(0xAB_u8);
+        }
+        // Drop the user-facing handle so the registry's Weak is the only reference.
+        drop(buf);
+        // After drop, the Weak in the registry is dead — this must not panic.
+        zeroize_all_registered_at_shutdown();
+    }
+
+    #[test]
+    fn zeroize_at_shutdown_zeroes_live_buffer() {
+        let buf = LockedBuffer::new(32).unwrap();
+        {
+            let mut g = buf.inner.lock().unwrap_or_else(|e| e.into_inner());
+            g.bytes().fill(0xAB_u8);
+        }
+        // Still holding buf — strong count is 1 (user) + upgrade in the function = 2.
+        zeroize_all_registered_at_shutdown();
+        // After the call the buffer contents must be zeroed.
+        let g = buf.inner.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            g.as_slice().iter().all(|&b| b == 0),
+            "buffer must be zeroed after shutdown call"
+        );
     }
 }
