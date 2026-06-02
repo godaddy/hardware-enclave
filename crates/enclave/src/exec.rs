@@ -178,7 +178,9 @@ pub struct TempSecretFile {
     path_str: String,
 }
 
+// Fields held only for their Drop side-effects (auto-cleanup of the fd/file).
 #[cfg(target_os = "linux")]
+#[allow(dead_code)]
 enum TempSecretInner {
     Memfd(enclaveapp_app_adapter::MemfdConfig),
     Fallback(enclaveapp_app_adapter::TempConfig),
@@ -205,10 +207,10 @@ impl TempSecretFile {
             match enclaveapp_app_adapter::create_memfd_config("enclave-secret", "secret", content) {
                 Ok(memfd) => {
                     let path_str = memfd.path().to_string_lossy().into_owned();
-                    return Ok(Self {
+                    Ok(Self {
                         _inner: TempSecretInner::Memfd(memfd),
                         path_str,
-                    });
+                    })
                 }
                 Err(_) => {
                     // memfd not available (e.g. older kernel); fall back to temp file.
@@ -222,10 +224,10 @@ impl TempSecretFile {
                         detail: e.to_string(),
                     })?;
                     let path_str = tc.path().to_string_lossy().into_owned();
-                    return Ok(Self {
+                    Ok(Self {
                         _inner: TempSecretInner::Fallback(tc),
                         path_str,
-                    });
+                    })
                 }
             }
         }

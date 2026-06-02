@@ -4,6 +4,7 @@
 use enclaveapp_app_storage::BackendKind;
 
 use crate::auth::AuthHandle;
+#[cfg(target_os = "macos")]
 use crate::capabilities::has_keychain_entitlement;
 use crate::config::EnclaveConfig;
 use crate::encryption::EncryptorHandle;
@@ -57,6 +58,9 @@ pub fn create_tamper_evident(app_name: &str) -> Result<TamperEvidentHandle> {
 fn validate_and_resolve_config(
     config: &EnclaveConfig,
 ) -> Result<enclaveapp_app_storage::StorageConfig> {
+    // `mut` is only used by the macOS cfg block below; suppress the lint
+    // on platforms where the mutation code is compiled out.
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut sc = config.to_storage_config();
 
     // Hard error: user_presence without access_group on unsigned binary.

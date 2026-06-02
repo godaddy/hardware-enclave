@@ -1,7 +1,9 @@
 // Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
+#[cfg(target_os = "macos")]
 use std::collections::HashMap;
+#[cfg(target_os = "macos")]
 use std::sync::{Mutex, OnceLock};
 
 use crate::types::{AccessPolicy, BackendKind};
