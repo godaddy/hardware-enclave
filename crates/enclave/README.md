@@ -1,23 +1,25 @@
 # enclave
 
-Hardware-backed key management and in-process memory protection for
-macOS (Secure Enclave), Windows (TPM 2.0), and Linux (TPM 2.0 / keyring).
+Hardware-backed signing and encryption for Rust — macOS Secure Enclave,
+Windows TPM 2.0, Linux TPM 2.0 / keyring.
+
+Private keys never leave the hardware. Touch ID and Windows Hello are built in.
 
 ---
 
-## What this is
+## What you can build with this
 
-`enclave` is two things in one crate:
-
-**Hardware key management** — ECDSA P-256 signing and ECIES P-256 encryption backed by the
-platform hardware security module. Private keys never leave the hardware. User-presence
-enforcement (Touch ID, Windows Hello) is built in and composable.
-
-**In-process memory protection** — guard-paged mlock'd buffers, AES-256-GCM in-memory sealed
-secrets, and a tiered pool of locked memory slots. Ported from
-[asherah-ffi](https://github.com/godaddy/asherah-ffi). These components can be used
-independently of the HSM layer, and compose with it: decrypted key material from the HSM
-can be held in sealed or guard-paged memory with no swap exposure.
+- **SSH key management** — hardware-backed P-256 keys, signed with Touch ID,
+  compatible with `ssh-agent` and `sk-ecdsa-sha2-nistp256@openssh.com`
+- **Credential caching** — encrypt API tokens and passwords under the TPM;
+  they survive process restart but cannot be stolen without hardware access
+- **Code signing / git commit signing** — hardware-enforced key storage with
+  optional biometric gate per operation
+- **Secret storage with integrity checks** — tamper-evident config files backed
+  by HMAC in the platform secure store (Keychain / DPAPI / Secret Service)
+- **In-process memory protection** — guard-paged, mlock'd buffers and
+  AES-256-GCM in-memory sealed secrets for long-lived processes that handle
+  sensitive material
 
 ---
 
@@ -25,258 +27,211 @@ can be held in sealed or guard-paged memory with no swap exposure.
 
 | | macOS | Windows | Linux | WSL2 |
 |--|:---:|:---:|:---:|:---:|
-| Signing / Encryption | Secure Enclave | TPM 2.0 | TPM 2.0 / keyring | Bridge → Windows TPM |
+| Signing (ECDSA P-256) | Secure Enclave | TPM 2.0 | TPM 2.0 / keyring | Bridge → Windows TPM |
+| Encryption (ECIES P-256) | Secure Enclave | TPM 2.0 | TPM 2.0 / keyring | Bridge → Windows TPM |
+| FIDO2 hardware security keys | — | ✅ WebAuthn | — | Bridge → Windows |
 | Touch ID / Windows Hello | ✅ | ✅ | — | — |
-| Guard-page buffers | ✅ | ✅ | ✅ | ✅ |
-| mlock'd / no-swap | ✅ | ✅ | ✅ | ✅ |
-| In-memory AES-GCM sealing | ✅ | ✅ | ✅ | ✅ |
 | Tamper-evident files | ✅ | ✅ | ✅ | ✅ |
+| Guard-page / mlock'd buffers | ✅ | ✅ | ✅ | ✅ |
 
 ---
 
-## Memory protection
+## Signing
 
-The in-process memory subsystem is the most differentiated part of this crate. It can be used
-without the HSM layer.
-
-### `SecureBuffer` — guard-paged, mlock'd allocation
-
-A page-guarded, mlock'd buffer for short-lived secret material. Guard pages on both sides
-trigger SIGSEGV on overflow/underflow. Random canaries are verified on `destroy()`. The inner
-region is zeroized before unmapping.
+Generate a P-256 key in the hardware, sign data, get a DER-encoded ECDSA
+signature back. Works identically on macOS (Secure Enclave), Windows (TPM),
+and Linux (TPM or keyring).
 
 ```rust
-use enclave::SecureBuffer;
+use enclave::{create_signer, EnclaveConfig, AccessPolicy};
 
-let key_material = [0u8; 32]; // your 32-byte secret
-let mut buf = SecureBuffer::new(32)?;
-buf.bytes().copy_from_slice(&key_material);
-buf.freeze()?;       // PROT_READ — prevents accidental mutation
-// ... use buf.as_slice() ...
-buf.destroy()?;      // verifies canaries, zeroizes, unmaps
-// or just drop — same effect, logged at error! if canaries are corrupt
+let config = EnclaveConfig::new("myapp", "signing-key");
+let signer = create_signer(&config)?;
+
+// Creates the key the first time; opens it on subsequent calls.
+signer.generate_key("signing-key", AccessPolicy::Any)?;
+
+// Returns a DER-encoded ECDSA P-256 signature.
+let sig: Vec<u8> = signer.sign("signing-key", data)?;
 ```
 
-State transitions: `Mutable` → `freeze()` → `Frozen` → `melt()` → `Mutable` → `destroy()` → `Dead`.
-
-### `LockedBuffer` — Arc-wrapped, thread-safe
-
-An `Arc<Mutex<SecureBuffer>>` for sharing secret material across threads, with a
-global registry for shutdown cleanup.
+### With user presence (Touch ID / Windows Hello)
 
 ```rust
-use enclave::{LockedBuffer, zeroize_all_registered_at_shutdown};
-use zeroize::Zeroizing;
+use enclave::PresenceOptions;
 
-let buf = LockedBuffer::random(32)?;              // OsRng-filled
-let copy: Zeroizing<Vec<u8>> = buf.bytes_zeroizing();
-buf.wipe();                                        // explicit zero (also happens on drop)
-// At process shutdown:
-zeroize_all_registered_at_shutdown();
+// Strict: prompt on every call. Cached: reuse within TTL (macOS only).
+let sig = signer.sign_with_presence(
+    "signing-key",
+    data,
+    &PresenceOptions::cached("SSH authentication", 14400), // 4-hour TTL
+)?;
 ```
 
-### `MemoryEnclave` — AES-256-GCM in-memory sealed secret
-
-Seals plaintext under the process-global Coffer key (stored XOR-split in two locked slab
-slots; neither half alone reveals the key). The plaintext lives only in the locked slab while
-open — never on the regular heap. A hot cache avoids decryption on repeated `open()` calls.
+### Key lifecycle
 
 ```rust
-use enclave::MemoryEnclave;
-
-let sealed = MemoryEnclave::seal(b"ephemeral secret")?;
-
-// Cold path: AES-256-GCM decrypt into a locked PoolSlot.
-// Hot path: copy from slab cache — no crypto.
-let slot = sealed.open()?;
-assert_eq!(&slot.as_slice()[..16], b"ephemeral secret");
-// slot drops → zeroed immediately
-// sealed drops → hot-cache entry evicted and zeroed
-```
-
-Crypto properties: nonce is 12 fresh OsRng bytes per seal (fork-safe). AES-256-GCM
-authentication: any bit flip in ciphertext or tag → `Err(DecryptFailed)`. Key schedule
-zeroized via `aes-gcm`'s `ZeroizeOnDrop` feature.
-
-### Pool and tiered slab
-
-The pool backs `MemoryEnclave::open()` and is available directly for any secret-sized
-allocation. The default global pool has one 32-byte tier (one mlock'd page, ~126 usable
-slots). Acquisitions larger than the tier's slot size fall back to a standalone
-`SecureBuffer`.
-
-```rust
-use enclave::{pool_acquire, pool_release, coffer_view, init_pool, TieredPoolConfig};
-
-// Optional: configure tiers before first use.
-init_pool(TieredPoolConfig { tier_sizes: vec![32, 64, 128] })?;
-
-let mut slot = pool_acquire(32)?;   // slab-backed (mlock'd single page)
-slot.bytes().copy_from_slice(&key); // write secret
-drop(slot);                          // → zeroed, returned to free list, Condvar notified
-
-// Get the Coffer master key for direct AES-GCM use.
-let key_slot = coffer_view()?;
-// ... use key_slot.as_slice() as AES-256 key ...
-drop(key_slot);                      // → zeroed, slot returned
+let pubkey: Vec<u8> = signer.public_key("signing-key")?;  // uncompressed SEC1
+let keys:   Vec<KeyInfo> = signer.list_keys()?;
+signer.rename_key("signing-key", "github-key")?;
+signer.delete_key("github-key")?;
 ```
 
 ---
 
-## Hardware key management
+## Encryption
 
-### Creating handles
-
-```rust
-use enclave::{create_signer, create_encryptor, EnclaveConfig, AccessPolicy};
-
-// App name gets `-unsigned` appended automatically for unsigned binaries,
-// preventing dev key namespace collisions with production keys.
-let config = EnclaveConfig::new("myapp", "default-key");
-let signer  = create_signer(&config)?;
-let encryptor = create_encryptor(&config)?;
-```
-
-### Signing (ECDSA P-256)
-
-`SignerHandle` is multi-key: every method takes a `label` parameter.
+ECIES P-256 encryption under a hardware-backed key. Encrypted data survives
+process restart; it can only be decrypted on the same machine by the same user.
 
 ```rust
-// Generate a hardware-backed P-256 signing key.
-let pubkey: Vec<u8> = signer.generate_key("ssh-key", AccessPolicy::Any)?;
+use enclave::{create_encryptor, EnclaveConfig, AccessPolicy};
 
-// Sign — returns DER-encoded ECDSA signature.
-let sig = signer.sign("ssh-key", message)?;
+let config = EnclaveConfig::new("myapp", "cache-key");
+let enc = create_encryptor(&config)?;
 
-// Sign with Touch ID (Strict → Err(PresenceNotAvailable) if no biometric).
-let sig = signer.sign_with_presence("ssh-key", message, &PresenceOptions::strict("SSH auth"))?;
+enc.generate_key("cache-key", AccessPolicy::None)?;
 
-// Key management.
-signer.list_keys()?;
-signer.key_exists("ssh-key")?;
-signer.delete_key("ssh-key")?;
-signer.rename_key("ssh-key", "github-key")?;
+let ciphertext: Vec<u8> = enc.encrypt("cache-key", b"my-api-token")?;
+
+// Returns Zeroizing<Vec<u8>> — wiped from memory on drop.
+let plaintext = enc.decrypt("cache-key", &ciphertext)?;
 ```
 
-### Encryption (ECIES P-256)
+The ECIES wire format is:
+`[0x01 version][65B ephemeral pubkey][12B nonce][ciphertext][16B GCM tag]`
 
-`EncryptorHandle` is multi-key. `decrypt` returns `Zeroizing<Vec<u8>>`.
+---
+
+## FIDO2 hardware security keys (Windows / WSL2)
+
+Generate TPM-bound FIDO2 credentials and produce `sk-ecdsa-sha2-nistp256@openssh.com`
+SSH signatures with hardware-enforced Windows Hello confirmation.
 
 ```rust
-encryptor.generate_key("cache-key", AccessPolicy::None)?;
+use enclave::{create_security_key, EnclaveConfig};
 
-let ciphertext = encryptor.encrypt("cache-key", b"secret credential")?;
-let plaintext  = encryptor.decrypt("cache-key", &ciphertext)?;
-// plaintext: Zeroizing<Vec<u8>> — zeroed when dropped
+let sk = create_security_key(&EnclaveConfig::new("myapp", "default"));
 
-encryptor.list_keys()?;
-encryptor.delete_key("cache-key")?;
+if sk.is_available() {
+    let info = sk.generate("github-key", Some("user@host"))?;
+    // info.credential_id, info.rp_id, info.public_key
+
+    let sig = sk.sign("github-key", ssh_session_data)?;
+    // sig.signature_der — raw ECDSA P-256
+    // sig.flags         — User Present / User Verified bits
+    // sig.counter       — monotonic TPM counter
+}
 ```
 
-Wire format (ECIES): `[0x01 version][65B ephemeral pubkey][12B nonce][ciphertext][16B GCM tag]`
+Only available on Windows native and WSL2 (via bridge to Windows TPM).
+Returns `Err(NotAvailable)` on macOS and native Linux.
 
-### User presence (Touch ID / Windows Hello)
+---
 
-`AuthHandle` gives a standalone presence check and cache eviction, decoupled from specific
-key operations.
+## Tamper-evident files
+
+HMAC-SHA-256 protection for config files, key metadata, and any file where you
+need to detect undetected modification. The HMAC key lives in the platform
+secure store; files on disk remain plaintext with a `.hmac` sidecar.
+
+```rust
+use enclave::{create_tamper_evident, VerifyOutcome};
+
+let handle = create_tamper_evident("myapp")?;
+
+handle.write(&path, config_bytes)?;
+
+match handle.verify(&path)? {
+    VerifyOutcome::Match   => { /* file is intact */ }
+    VerifyOutcome::Tamper  => { /* reject — file was modified externally */ }
+    VerifyOutcome::Legacy  => { handle.migrate(&path)?; /* bootstrap existing file */ }
+    _                      => {}
+}
+
+// read() verifies and returns content in one step.
+let content: Vec<u8> = handle.read(&path)?;
+```
+
+For high-security files, `.with_trust_anchor()` stores the HMAC in the platform
+secure store — deleting the sidecar cannot bypass verification.
+
+**For tests and CI** (no Keychain/DPAPI access, no prompts):
+
+```rust
+use enclave::create_tamper_evident_ephemeral;
+
+let handle = create_tamper_evident_ephemeral("myapp");
+```
+
+---
+
+## User presence
+
+Acquire a standalone presence confirmation decoupled from any specific key
+operation, or evict the cached presence token to force re-authentication.
 
 ```rust
 use enclave::create_auth;
 
 let auth = create_auth(&config)?;
 let caps = auth.capabilities();
-// caps: { biometric_available, password_available, presence_caching, authenticator_name }
+// caps.biometric_available, caps.presence_caching, caps.authenticator_name
 
-// Prompt synchronously — blocks until user responds.
-auth.request_presence("Authorize credential access")?;
-
-// Force re-authentication for subsequent sign_with_presence calls.
-auth.evict_presence_cache();
-```
-
-On macOS: `LAContext.evaluatePolicy(.deviceOwnerAuthentication)`.  
-On Windows: `UserConsentVerifier.RequestVerificationAsync` with Hello → password fallback.  
-On Linux: returns `Err(PresenceNotAvailable)`.
-
----
-
-## Hardware security keys (FIDO2 / WebAuthn)
-
-`SecurityKeyHandle` manages FIDO2 platform authenticator credentials backed by
-the Windows Hello TPM (Windows native) or the Windows TPM via a JSON-RPC bridge
-(WSL2). Returns `NotAvailable` on macOS and non-WSL Linux.
-
-```rust
-use enclave::{create_security_key, EnclaveConfig};
-
-let config = EnclaveConfig::new("myapp", "default");
-let sk = create_security_key(&config);
-
-if sk.is_available() {
-    // Fires a Windows Hello gesture; creates a TPM-bound FIDO2 credential.
-    let info = sk.generate("ssh-key", Some("user@host"))?;
-
-    // sign() also fires Hello. Returns the full FIDO2 assertion.
-    let sig = sk.sign("ssh-key", data_to_sign)?;
-    // sig.signature_der — DER ECDSA P-256
-    // sig.flags         — User Present / User Verified bits
-    // sig.counter       — monotonic TPM counter
-}
-```
-
-`SecurityKeySignature` contains everything needed to build an
-`sk-ecdsa-sha2-nistp256@openssh.com` SSH signature wire format.
-
----
-
-## Tamper-evident files
-
-HMAC-SHA-256 protected files. The per-app HMAC key lives in the platform secure store
-(Keychain / DPAPI / Secret Service); it never appears on disk.
-
-Two modes — pick based on the number of files you need to protect:
-
-```rust
-use enclave::{create_tamper_evident, IntegrityMode};
-
-// Sidecar mode (default): one secure-store entry per app.
-// Scales to any file count. The .hmac sidecar is authoritative.
-let handle = create_tamper_evident("myapp")?;
-
-// TrustAnchor mode: one secure-store entry per file in addition to the per-app key.
-// The platform secure store is authoritative — deleting the sidecar cannot bypass verification.
-// Use for low-volume, high-value files only.
-let handle = create_tamper_evident("myapp")?.with_trust_anchor();
-
-handle.write(&path, content)?;
-
-match handle.verify(&path)? {
-    VerifyOutcome::Match          => { /* content unchanged */ }
-    VerifyOutcome::Tamper         => { /* reject */ }
-    VerifyOutcome::Legacy         => { handle.migrate(&path)?; } // bootstrap
-    VerifyOutcome::StoreUnavailable => { /* fail-open */ }
-    VerifyOutcome::NotFound       => { /* file absent */ }
-}
-
-// read() returns content or Err(TamperDetected).
-let content = handle.read(&path)?;
+auth.request_presence("Authorizing SSH key access")?;
+auth.evict_presence_cache(); // force re-auth on the next operation
 ```
 
 ---
 
-## Binary identity
+## In-process memory protection
 
-Unsigned binaries (e.g. `cargo build`) work fully — they automatically use a `-unsigned`
-app name to avoid colliding with production keys. The library never silently degrades; it
-returns `Error::RequiresSigning` when a config option requires an entitlement the binary
-doesn't have.
+Protect secret material that lives in the process for extended periods —
+session tokens, decrypted keys, cached credentials. Ported from
+[asherah-ffi](https://github.com/godaddy/asherah-ffi).
+
+### Guard-paged buffers
+
+Pages flanking the secret region are set to `PROT_NONE`; overflows trigger
+SIGSEGV. Random canaries are verified on `destroy()`. The region is mlock'd
+(no swap) and zeroized before unmapping.
 
 ```rust
-use enclave::{is_binary_signed, has_keychain_entitlement, security_capabilities};
+use enclave::SecureBuffer;
 
-is_binary_signed()                              // path heuristic + codesign check on macOS
-has_keychain_entitlement("TEAM.bundle.id")      // checks actual codesign entitlements
-security_capabilities("myapp")                  // full posture: backend, entitlement, policy rec
+let mut buf = SecureBuffer::new(32)?;
+buf.bytes().copy_from_slice(&key_material);
+buf.freeze()?;        // PROT_READ — no accidental mutation
+// ... use buf.as_slice() ...
+buf.destroy()?;       // zeroizes, verifies canaries, unmaps
+```
+
+### AES-256-GCM in-memory sealed secrets
+
+Secrets live as ciphertext on the heap and are only decrypted briefly when you
+call `open()`. The plaintext is returned in a guard-paged, mlock'd slot — not
+the regular heap — and is zeroed when the slot drops.
+
+```rust
+use enclave::MemoryEnclave;
+
+let sealed = MemoryEnclave::seal(b"session-token-xyz")?;
+
+let slot = sealed.open()?;
+// use slot.as_slice() — plaintext is here
+// slot drops → plaintext zeroed immediately
+```
+
+### Thread-safe shared buffers
+
+```rust
+use enclave::{LockedBuffer, zeroize_all_registered_at_shutdown};
+
+let buf = LockedBuffer::from_bytes(b"shared-secret")?;
+let copy = buf.bytes_zeroizing(); // Zeroizing<Vec<u8>>
+
+// At process shutdown, zero all registered buffers:
+zeroize_all_registered_at_shutdown();
 ```
 
 ---
@@ -284,19 +239,33 @@ security_capabilities("myapp")                  // full posture: backend, entitl
 ## Configuration
 
 ```rust
-EnclaveConfig {
-    app_name: "myapp".into(),
-    default_key_label: "main".into(),
-    access_policy: None,              // auto: None for signed, Any for unsigned
-    keys_dir: None,                   // default: ~/.config/myapp/keys/
-    platform: PlatformConfig::MacOs(MacOsConfig {
-        wrapping_key_user_presence: true,
-        keychain_access_group: Some("TEAM.com.example.myapp".into()),
-        wrapping_key_cache_ttl: Duration::from_secs(300),
-        ..MacOsConfig::default()
-    }),
-}
+use enclave::{EnclaveConfig, PlatformConfig};
+
+let config = EnclaveConfig::new("myapp", "default-key");
+// -unsigned is appended to app_name automatically for unsigned binaries,
+// preventing dev key collisions with production keys.
 ```
+
+**macOS: Touch ID gate on the wrapping key (requires entitlement):**
+
+```rust
+use enclave::{PlatformConfig, MacOsConfig};
+use std::time::Duration;
+
+PlatformConfig::MacOs(MacOsConfig {
+    wrapping_key_user_presence: true,
+    keychain_access_group: Some("TEAM.com.example.myapp".into()),
+    wrapping_key_cache_ttl: Duration::from_secs(14400),
+    ..MacOsConfig::default()
+})
+```
+
+### Signed vs unsigned binaries
+
+Development builds (`cargo build`) are unsigned. `enclave` appends `-unsigned`
+to your app name automatically, preventing dev keys from ever touching
+production key storage. Production signed builds get full Keychain ACL binding
+(macOS), meaning only your binary can access its own keys.
 
 ---
 
@@ -304,50 +273,42 @@ EnclaveConfig {
 
 | Property | Mechanism |
 |----------|-----------|
-| No plaintext keys on disk | HSM keeps private keys in hardware; software backends encrypt under keyring |
-| No swap exposure | `mlock` on `SecureBuffer`, `LockedBuffer`, and slab pages |
-| Overflow detection | Guard pages (`PROT_NONE`) + random canaries verified on destroy |
-| Zeroization | All secret-bearing types zero on drop: `SecureBuffer`, `PoolSlot`, slab hot-cache entries |
-| AES-GCM authentication | Any ciphertext modification → `Err(DecryptFailed)` |
-| Coffer key splitting | `left XOR SHA-256(right)` — neither half reveals the key |
-| Process hardening | `RLIMIT_CORE=0`, `PR_SET_DUMPABLE=0` (Linux), strict handle checks (Windows) |
-| Dev/prod isolation | `-unsigned` suffix prevents dev keys from touching production key stores |
-| No silent downgrades | Factory errors at construction time, not first use |
+| Keys never leave hardware | SE / TPM only performs private-key operations |
+| No swap exposure | `mlock` + `MADV_DONTDUMP` on all secret pages |
+| Buffer overflow detection | `PROT_NONE` guard pages + random canaries |
+| Zeroization | All secret-bearing types wipe memory on drop |
+| Ciphertext integrity | AES-256-GCM authentication (`MemoryEnclave`) |
+| Metadata integrity | HMAC-SHA-256 verified against platform secure store |
+| Dev/prod isolation | `-unsigned` suffix on unsigned binary app names |
+
+See [THREAT_MODEL.md](THREAT_MODEL.md) for the full threat model, limitations,
+and residual risks.
 
 ---
 
-## Error handling
+## Building applications that wrap third-party tools
 
-`enclave::Error` is `#[non_exhaustive]` — match with a `_` fallback arm.
-
-Notable variants:
-- `TamperDetected` — file HMAC mismatch
-- `RequiresSigning { feature }` — config requires a code-signed binary
-- `PolicyNotSupported { policy }` — backend cannot enforce the requested `AccessPolicy`
-- `PresenceNotAvailable` — `sign_with_presence(Strict, ...)` on a platform without biometric
-- `NotImplemented { feature }` — API stub (see individual method docs)
+If you're building an application that wraps a CLI tool and needs to inject
+secrets into it (via environment variables, temp files, or an agent protocol),
+see [DELIVERY_TIERS.md](DELIVERY_TIERS.md) for the four integration patterns
+and guidance on when to use each.
 
 ---
 
-## Running the examples
-
-Each example runs with real hardware or with a software mock for CI/development:
+## Examples
 
 ```bash
-# Memory protection (no hardware required)
+# No hardware required — always works
 cargo run --example memory_protection
-
-# Tamper-evident files (no hardware required)
 cargo run --example integrity
 
-# Signing with hardware (Touch ID / TPM)
-cargo run --example signing
-
-# Signing with software mock (no hardware, CI-safe)
+# Software mock (CI-safe, no prompts, no hardware)
 ENCLAVE_MOCK=1 cargo run --example signing
-
-# Encryption with software mock
 ENCLAVE_MOCK=1 cargo run --example encryption
+
+# Real hardware (prompts Touch ID / Windows Hello)
+cargo run --example signing
+cargo run --example encryption
 
 # Run all CI-safe examples via cargo test
 ENCLAVE_MOCK=1 cargo test --test examples_ci
