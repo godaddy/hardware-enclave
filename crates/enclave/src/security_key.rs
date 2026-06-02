@@ -394,7 +394,11 @@ impl SecurityKeyHandle {
     }
 
     #[allow(clippy::needless_return, unreachable_code)]
-    fn do_delete_credential(&self, _credential_id: &[u8]) -> Result<()> {
+    #[cfg_attr(
+        not(any(target_os = "windows", target_os = "linux")),
+        allow(unused_variables)
+    )]
+    fn do_delete_credential(&self, credential_id: &[u8]) -> Result<()> {
         match &self.backend {
             #[cfg(target_os = "windows")]
             SkBackend::Native => {
@@ -500,7 +504,7 @@ fn hex_to_32(hex: &str) -> std::result::Result<[u8; 32], String> {
     if hex.len() != 64 {
         return Err(format!("expected 64 hex chars, got {}", hex.len()));
     }
-    let mut out = [0u8; 32];
+    let mut out = [0_u8; 32];
     for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
         let s = std::str::from_utf8(chunk).map_err(|e| e.to_string())?;
         out[i] = u8::from_str_radix(s, 16).map_err(|e| e.to_string())?;
