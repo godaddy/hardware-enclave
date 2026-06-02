@@ -298,17 +298,17 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 fn decode_hex_tag(hex: &str) -> Result<[u8; 32]> {
     if hex.len() != 64 {
         // Wrong length → treat as tampered.
-        return Ok([0u8; 32]);
+        return Ok([0_u8; 32]);
     }
-    let mut out = [0u8; 32];
+    let mut out = [0_u8; 32];
     for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
         let s = match std::str::from_utf8(chunk) {
             Ok(s) => s,
-            Err(_) => return Ok([0u8; 32]),
+            Err(_) => return Ok([0_u8; 32]),
         };
         out[i] = match u8::from_str_radix(s, 16) {
             Ok(b) => b,
-            Err(_) => return Ok([0u8; 32]),
+            Err(_) => return Ok([0_u8; 32]),
         };
     }
     Ok(out)
