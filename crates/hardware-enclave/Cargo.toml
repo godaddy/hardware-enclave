@@ -46,7 +46,7 @@ tss-esapi = { workspace = true }
 # and its `libtss2`/tss-esapi link. Consumers that only use the keyring
 # backend or the WSL→Windows bridge set `default-features = false` so the
 # binary does not require `libtss2` to be installed to start.
-default = ["linux-tpm", "signing", "encryption"]
+default = ["signing", "encryption"]
 linux-tpm = []
 signing = []
 encryption = []
