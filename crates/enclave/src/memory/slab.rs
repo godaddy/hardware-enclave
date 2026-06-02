@@ -31,9 +31,9 @@ pub const DEFAULT_SLOT_SIZE: usize = 32;
 pub(crate) const SLOT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Slot index for the Coffer left half (stores master_key XOR SHA-256(right)).
-const COFFER_LEFT: usize = 0;
+pub(crate) const COFFER_LEFT: usize = 0;
 /// Slot index for the Coffer right half (stores random bytes).
-const COFFER_RIGHT: usize = 1;
+pub(crate) const COFFER_RIGHT: usize = 1;
 /// First slot index available to the shared pool (free/cached/transient).
 pub(crate) const FIRST_SHARED_SLOT: usize = 2;
 
@@ -655,5 +655,219 @@ mod tests {
         for idx in acquired {
             slab.release(idx);
         }
+    }
+
+    #[test]
+    fn free_list_is_lifo_highest_index_first() {
+        let mut slab = SecureSlab::new(DEFAULT_SLOT_SIZE, false).unwrap();
+        let usable = slab.total_slots() - FIRST_SHARED_SLOT;
+        // Drain all free slots; they should come out in descending order (highest first = LIFO pop).
+        let mut indices = Vec::new();
+        while let Some(idx) = slab.acquire_transient() {
+            indices.push(idx);
+        }
+        assert_eq!(indices.len(), usable, "all usable slots should be acquired");
+        // LIFO: first pop = total_slots - 1 (the last element pushed during init).
+        assert_eq!(indices[0], slab.total_slots() - 1);
+        // Return all.
+        for idx in indices {
+            slab.release(idx);
+        }
+    }
+
+    #[test]
+    fn released_slot_is_zeroed() {
+        let mut slab = SecureSlab::new(DEFAULT_SLOT_SIZE, false).unwrap();
+        let idx = slab.acquire_transient().unwrap();
+        // Write a known pattern.
+        let (ptr, len) = slab.slot_raw(idx).unwrap();
+        unsafe { std::slice::from_raw_parts_mut(ptr, len).fill(0xBE) };
+        // Release (should zeroize).
+        slab.release(idx);
+        // Re-acquire the same slot (LIFO: should get it back immediately).
+        let idx2 = slab.acquire_transient().unwrap();
+        let (ptr2, len2) = slab.slot_raw(idx2).unwrap();
+        let slice = unsafe { std::slice::from_raw_parts(ptr2, len2) };
+        assert!(
+            slice.iter().all(|&b| b == 0),
+            "released slot must be zeroed"
+        );
+        slab.release(idx2);
+    }
+
+    #[test]
+    fn double_acquire_returns_different_indices() {
+        let mut slab = SecureSlab::new(DEFAULT_SLOT_SIZE, false).unwrap();
+        let a = slab.acquire_transient().unwrap();
+        let b = slab.acquire_transient().unwrap();
+        assert_ne!(a, b, "two consecutive acquires must return different slots");
+        slab.release(a);
+        slab.release(b);
+    }
+
+    #[test]
+    fn acquire_transient_single_entry_self_eviction_guard() {
+        let mut slab = SecureSlab::new(DEFAULT_SLOT_SIZE, false).unwrap();
+        // Put exactly one entry in the cache and fill all free slots transiently.
+        let usable = slab.total_slots() - FIRST_SHARED_SLOT;
+        let data = [0x42_u8; DEFAULT_SLOT_SIZE];
+        slab.cache_insert(999, &data);
+        // Fill (usable - 1) transient slots (one is used by the cached entry).
+        let mut held = Vec::new();
+        for _ in 0..(usable - 1) {
+            if let Some(idx) = slab.acquire_transient() {
+                held.push(idx);
+            }
+        }
+        // Now free list is empty; only cache has an entry (id 999).
+        // acquire_transient must evict LRU (id 999) to give us a slot.
+        let result = slab.acquire_transient();
+        // The LRU (999) was evicted to give us a slot.
+        assert!(
+            result.is_some(),
+            "should evict cache entry to give us a slot"
+        );
+        // 999 must be gone from cache.
+        assert!(
+            slab.cache_get(999).is_none(),
+            "cache entry 999 must be evicted"
+        );
+        for idx in held {
+            slab.release(idx);
+        }
+        if let Some(idx) = result {
+            slab.release(idx);
+        }
+    }
+
+    #[test]
+    fn lru_ordering_insert_a_b_c_access_a_evicts_b_next() {
+        let mut slab = SecureSlab::new(DEFAULT_SLOT_SIZE, false).unwrap();
+        let usable = slab.total_slots() - FIRST_SHARED_SLOT;
+        assert!(
+            usable >= 4,
+            "need at least 4 usable slots for this test (A+B+C+D)"
+        );
+        let data = [0x11_u8; DEFAULT_SLOT_SIZE];
+        // Insert A, B, C in order.
+        slab.cache_insert(1, &data);
+        slab.cache_insert(2, &data);
+        slab.cache_insert(3, &data);
+        // Access A → A promoted to MRU; LRU order becomes: B, C, A.
+        let copy = slab.cache_get(1).unwrap();
+        slab.release(copy);
+        // Fill remaining free slots to force eviction on next insert.
+        // We have (usable - 3) free slots; hold (usable - 4) so one slot remains for D's eviction
+        // path (D must evict B to get a slot). Hold all but zero: fill everything.
+        let slots_used = 3; // A, B, C are cached
+        let free_left = usable - slots_used;
+        let mut held = Vec::new();
+        for _ in 0..free_left {
+            if let Some(idx) = slab.acquire_transient() {
+                held.push(idx);
+            }
+        }
+        // Insert D — must evict B (the LRU after A was promoted), NOT A or C.
+        slab.cache_insert(4, &data);
+        // B must be gone.
+        // To verify A, C, D without consuming slots (slab is full):
+        // release held slots first so cache_get has room to make copies.
+        for idx in held {
+            slab.release(idx);
+        }
+        // B was evicted by D's insertion.
+        assert!(
+            slab.cache_get(2).is_none(),
+            "B must be evicted (LRU after A was promoted)"
+        );
+        // A and C must still be present.
+        if let Some(idx) = slab.cache_get(1) {
+            slab.release(idx);
+        } else {
+            panic!("A must still be cached (was promoted to MRU)");
+        }
+        if let Some(idx) = slab.cache_get(3) {
+            slab.release(idx);
+        } else {
+            panic!("C must still be cached");
+        }
+        if let Some(idx) = slab.cache_get(4) {
+            slab.release(idx);
+        }
+    }
+
+    #[test]
+    fn cache_same_id_overwritten() {
+        let mut slab = SecureSlab::new(DEFAULT_SLOT_SIZE, false).unwrap();
+        let data1 = [0x11_u8; DEFAULT_SLOT_SIZE];
+        let data2 = [0x22_u8; DEFAULT_SLOT_SIZE];
+        slab.cache_insert(42, &data1);
+        // Overwrite same id with different data.
+        slab.cache_insert(42, &data2);
+        let idx = slab.cache_get(42).unwrap();
+        let (ptr, len) = slab.slot_raw(idx).unwrap();
+        let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+        assert_eq!(slice, &data2, "second insert must overwrite first");
+        slab.release(idx);
+    }
+
+    #[test]
+    fn coffer_key_not_all_zeros() {
+        let mut slab = SecureSlab::new(DEFAULT_SLOT_SIZE, true).unwrap();
+        let idx = slab.coffer_view().unwrap();
+        let (ptr, len) = slab.slot_raw(idx).unwrap();
+        let key = unsafe { std::slice::from_raw_parts(ptr, len) };
+        assert!(
+            key.iter().any(|&b| b != 0),
+            "coffer key must not be all zeros"
+        );
+        slab.release(idx);
+    }
+
+    #[test]
+    fn coffer_key_is_different_from_right_half() {
+        // Verify the master key is NOT equal to the raw right bytes
+        // (i.e., the XOR derivation actually changes the value).
+        let mut slab = SecureSlab::new(DEFAULT_SLOT_SIZE, true).unwrap();
+        let key_idx = slab.coffer_view().unwrap();
+        let (kptr, klen) = slab.slot_raw(key_idx).unwrap();
+        let key = unsafe { std::slice::from_raw_parts(kptr, klen).to_vec() };
+        slab.release(key_idx);
+        // Read the right half (slot 1) directly via slot_raw (no acquire/release needed).
+        let (rptr, rlen) = slab.slot_raw(COFFER_RIGHT).unwrap();
+        let right = unsafe { std::slice::from_raw_parts(rptr, rlen).to_vec() };
+        assert_ne!(key, right, "coffer key must differ from raw right half");
+    }
+
+    #[test]
+    fn minimum_slot_size_valid() {
+        // slot_size that results in exactly page_size total bytes is valid.
+        let slab = SecureSlab::new(DEFAULT_SLOT_SIZE, false).unwrap();
+        let ps = page_size();
+        assert_eq!(slab.total_slots(), ps / DEFAULT_SLOT_SIZE);
+    }
+
+    #[test]
+    fn cache_evicted_entry_slot_is_zeroed() {
+        // When an entry is evicted from cache, its slot must be zeroed before returning to free list.
+        let mut slab = SecureSlab::new(DEFAULT_SLOT_SIZE, false).unwrap();
+        let usable = slab.total_slots() - FIRST_SHARED_SLOT;
+        let pattern = vec![0xAA_u8; DEFAULT_SLOT_SIZE];
+        // Fill all slots with cache entries.
+        for id in 0..(usable as u64) {
+            slab.cache_insert(id, &pattern);
+        }
+        // acquire_transient forces LRU eviction (id=0).
+        let evicted_id = 0_u64;
+        let new_idx = slab.acquire_transient().unwrap();
+        assert!(slab.cache_get(evicted_id).is_none(), "id=0 must be evicted");
+        // The newly acquired slot (previously held by id=0) must be zeroed.
+        let (ptr, len) = slab.slot_raw(new_idx).unwrap();
+        let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+        assert!(
+            slice.iter().all(|&b| b == 0),
+            "evicted cache slot must be zeroed"
+        );
+        slab.release(new_idx);
     }
 }

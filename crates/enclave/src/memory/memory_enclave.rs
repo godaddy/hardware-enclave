@@ -428,4 +428,169 @@ mod tests {
             "nonce is all zeros — OsRng may be broken"
         );
     }
+
+    #[test]
+    fn seal_and_open_boundary_sizes() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for size in [
+            0_usize, 1, 15, 16, 31, 32, 33, 63, 64, 1023, 1024, 4095, 4096, 65535,
+        ] {
+            let plaintext = vec![0x5A_u8; size];
+            let enc = MemoryEnclave::seal(&plaintext).unwrap();
+            assert_eq!(
+                enc.plaintext_len(),
+                size,
+                "size {size}: plaintext_len mismatch"
+            );
+            let slot = enc.open().unwrap();
+            assert_eq!(
+                &slot.as_slice()[..size],
+                &plaintext[..],
+                "size {size}: roundtrip mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn nonce_tampering_fails_authentication() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut enc = MemoryEnclave::seal(b"tamper nonce test").unwrap();
+        // Flip a bit in the nonce (first 12 bytes of ciphertext).
+        enc.ciphertext[0] ^= 0x01;
+        let result = enc.open();
+        assert!(
+            matches!(result, Err(Error::DecryptFailed { .. })),
+            "nonce tampering must fail authentication: {result:?}"
+        );
+    }
+
+    #[test]
+    fn tag_tampering_fails_authentication() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut enc = MemoryEnclave::seal(b"tamper tag test").unwrap();
+        // Flip a bit in the GCM tag (last 16 bytes of ciphertext).
+        let len = enc.ciphertext.len();
+        enc.ciphertext[len - 1] ^= 0x01;
+        let result = enc.open();
+        assert!(
+            matches!(result, Err(Error::DecryptFailed { .. })),
+            "tag tampering must fail authentication: {result:?}"
+        );
+    }
+
+    #[test]
+    fn seal_ids_are_unique_and_increasing() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let encs: Vec<_> = (0..10)
+            .map(|_| MemoryEnclave::seal(b"x").unwrap())
+            .collect();
+        let ids: Vec<u64> = encs.iter().map(|e| e.id()).collect();
+        // All distinct.
+        let mut sorted = ids.clone();
+        sorted.dedup();
+        assert_eq!(sorted.len(), ids.len(), "all IDs must be unique");
+        // Strictly increasing.
+        for w in ids.windows(2) {
+            assert!(
+                w[0] < w[1],
+                "IDs must be strictly increasing: {} < {}",
+                w[0],
+                w[1]
+            );
+        }
+    }
+
+    #[test]
+    fn different_plaintexts_produce_different_ciphertexts() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let enc1 = MemoryEnclave::seal(b"first plaintext").unwrap();
+        let enc2 = MemoryEnclave::seal(b"second plaintext").unwrap();
+        assert_ne!(enc1.ciphertext, enc2.ciphertext);
+    }
+
+    #[test]
+    fn open_after_drop_uses_cold_path() {
+        // Seal → open (populates cache) → drop enclave (evicts cache) →
+        // seal again with same data → open (cold path, new ciphertext).
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let secret = b"cold path test";
+        let enc1 = MemoryEnclave::seal(secret).unwrap();
+        let id1 = enc1.id();
+        let slot1 = enc1.open().unwrap();
+        drop(slot1);
+        drop(enc1); // evicts cache
+                    // Cache must be gone.
+        assert!(hot_cache_get(id1).is_none());
+        // Second seal/open works (cold path only).
+        let enc2 = MemoryEnclave::seal(secret).unwrap();
+        let slot2 = enc2.open().unwrap();
+        assert_eq!(&slot2.as_slice()[..secret.len()], secret);
+    }
+
+    #[test]
+    fn seal_slot_does_not_consume_slot() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let secret = b"slot test value";
+        let mut slot = pool_acquire(secret.len()).unwrap();
+        slot.bytes()[..secret.len()].copy_from_slice(secret);
+        let enc = MemoryEnclave::seal_slot(&slot).unwrap();
+        // slot is still usable (seal_slot takes &PoolSlot, not by value).
+        assert_eq!(&slot.as_slice()[..secret.len()], secret);
+        // But the sealed data is independent.
+        drop(slot); // zeroizes original
+        let recovered = enc.open().unwrap();
+        assert_eq!(&recovered.as_slice()[..secret.len()], secret);
+    }
+
+    #[test]
+    fn ciphertext_nonce_is_twelve_bytes() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let enc = MemoryEnclave::seal(b"nonce len test").unwrap();
+        // First 12 bytes are the nonce; verify they're not all zeros.
+        assert!(
+            enc.ciphertext[..12].iter().any(|&b| b != 0),
+            "nonce (first 12 bytes) must not be all zeros"
+        );
+        // Total length: 12 (nonce) + plaintext_len + 16 (GCM tag).
+        assert_eq!(enc.ciphertext.len(), 12 + enc.plaintext_len() + 16);
+    }
+
+    #[test]
+    fn coffer_slot_released_after_seal() {
+        // Verify the coffer slot is returned to the pool after seal completes.
+        // If it weren't, multiple seals would exhaust the slab.
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for _ in 0..20 {
+            MemoryEnclave::seal(b"coffer slot release test").unwrap();
+        }
+        // If coffer slots leaked, the pool would be exhausted and the loop would fail.
+    }
+
+    #[test]
+    fn concurrent_seal_and_open() {
+        use std::sync::Arc;
+        use std::thread;
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // 4 threads each seal a secret and immediately open it, independently.
+        let barrier = Arc::new(std::sync::Barrier::new(4));
+        let handles: Vec<_> = (0..4_u8)
+            .map(|i| {
+                let b = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    let secret = vec![i; 16];
+                    let enc = MemoryEnclave::seal(&secret).unwrap();
+                    b.wait();
+                    let slot = enc.open().unwrap();
+                    assert_eq!(
+                        &slot.as_slice()[..16],
+                        &secret[..],
+                        "thread {i}: roundtrip mismatch"
+                    );
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+    }
 }

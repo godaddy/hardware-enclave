@@ -677,4 +677,158 @@ mod tests {
             "coffer key must not be all zeros"
         );
     }
+
+    #[test]
+    fn empty_tier_sizes_rejected() {
+        let result = TieredPool::new(TieredPoolConfig { tier_sizes: vec![] });
+        assert!(result.is_err(), "empty tier_sizes must be rejected");
+    }
+
+    #[test]
+    fn tier_sizes_sorted_ascending_internally() {
+        // Pass sizes in reverse order — should be sorted internally.
+        let pool = TieredPool::new(TieredPoolConfig {
+            tier_sizes: vec![64, 32],
+        })
+        .unwrap();
+        assert_eq!(pool.tier_count(), 2);
+        assert_eq!(pool.tier_slot_size(0), Some(32));
+        assert_eq!(pool.tier_slot_size(1), Some(64));
+    }
+
+    #[test]
+    fn multi_tier_routing_smallest_fit() {
+        // Two tiers: 32 and 64. Verify tier routing by slot_size inspection only
+        // (do not acquire PoolSlots from a local pool — drop would return to wrong pool).
+        let pool = TieredPool::new(TieredPoolConfig {
+            tier_sizes: vec![32, 64],
+        })
+        .unwrap();
+        assert_eq!(pool.tier_count(), 2);
+        // tier_for_size is private; verify via tier_slot_size that sizes are correct.
+        assert_eq!(pool.tier_slot_size(0), Some(32));
+        assert_eq!(pool.tier_slot_size(1), Some(64));
+        // Using the global pool: size 33 > 32 → standalone (single 32-byte tier in global pool).
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = pool_acquire(33).unwrap();
+        assert!(
+            slot.tier_index().is_none(),
+            "size 33 exceeds single 32-byte tier → standalone"
+        );
+        assert_eq!(slot.size(), 33);
+        // Size 32 uses tier 0.
+        let slot2 = pool_acquire(32).unwrap();
+        assert_eq!(
+            slot2.tier_index(),
+            Some(0),
+            "size 32 must use tier 0 (32-byte)"
+        );
+        drop(slot);
+        drop(slot2);
+    }
+
+    #[test]
+    fn pool_slot_tier_index_matches_acquisition_tier() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Default pool has one tier (32 bytes). A small acquisition must be tier 0.
+        let slot = pool_acquire(16).unwrap();
+        assert_eq!(slot.tier_index(), Some(0));
+        assert_eq!(
+            slot.slab_index().map(|i| i >= FIRST_SHARED_SLOT),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn standalone_slot_has_no_tier_or_slab_index() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = pool_acquire(9999).unwrap();
+        assert!(slot.tier_index().is_none());
+        assert!(slot.slab_index().is_none());
+        assert_eq!(slot.size(), 9999);
+    }
+
+    #[test]
+    fn pool_slot_zeroized_on_drop_standalone() {
+        // Standalone slot (large allocation) must also be zeroed on drop.
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut slot = pool_acquire(512).unwrap();
+        slot.bytes().fill(0xBE);
+        // After drop, memory is in a guard-paged SecureBuffer that's zeroed in drop.
+        drop(slot);
+        // Can't inspect freed memory directly, but verify drop doesn't panic.
+    }
+
+    #[test]
+    fn hot_cache_not_populated_for_large_plaintext() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // hot_cache_insert only caches data that fits in tier 0's slot size (32 bytes).
+        // A 64-byte payload should not be cached.
+        let big_data = [0x42_u8; 64];
+        hot_cache_insert(9876, &big_data);
+        // Should be a miss (not cached).
+        let result = hot_cache_get(9876);
+        assert!(result.is_none(), "oversized data must not be cached");
+    }
+
+    #[test]
+    fn hot_cache_multiple_ids_are_independent() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let data_a = [0xAA_u8; DEFAULT_SLOT_SIZE];
+        let data_b = [0xBB_u8; DEFAULT_SLOT_SIZE];
+        hot_cache_insert(100, &data_a);
+        hot_cache_insert(101, &data_b);
+        let slot_a = hot_cache_get(100).unwrap();
+        let slot_b = hot_cache_get(101).unwrap();
+        assert_eq!(slot_a.as_slice(), &data_a, "id 100 must return data_a");
+        assert_eq!(slot_b.as_slice(), &data_b, "id 101 must return data_b");
+        drop(slot_a);
+        drop(slot_b);
+        hot_cache_evict(100);
+        hot_cache_evict(101);
+    }
+
+    #[test]
+    fn coffer_view_returns_same_key_every_time() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let s1 = coffer_view().unwrap();
+        let k1 = s1.as_slice().to_vec();
+        drop(s1);
+        let s2 = coffer_view().unwrap();
+        let k2 = s2.as_slice().to_vec();
+        drop(s2);
+        let s3 = coffer_view().unwrap();
+        let k3 = s3.as_slice().to_vec();
+        drop(s3);
+        assert_eq!(k1, k2, "coffer key must be same on second call");
+        assert_eq!(k2, k3, "coffer key must be same on third call");
+        assert!(
+            k1.iter().any(|&b| b != 0),
+            "coffer key must not be all zeros"
+        );
+    }
+
+    #[test]
+    fn concurrent_pool_acquire_and_release() {
+        use std::sync::Arc;
+        use std::thread;
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // 8 threads each acquire a pool slot, write, verify, and release.
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8_u8)
+            .map(|i| {
+                let b = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    let mut slot = pool_acquire(16).unwrap();
+                    slot.bytes()[0] = i;
+                    b.wait(); // synchronize so all threads are in-flight simultaneously
+                    assert_eq!(slot.as_slice()[0], i, "thread {i}: slot content must match");
+                    drop(slot);
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+    }
 }

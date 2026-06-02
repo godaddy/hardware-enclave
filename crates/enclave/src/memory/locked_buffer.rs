@@ -186,4 +186,122 @@ mod tests {
             "buffer must be zeroed after shutdown call"
         );
     }
+
+    #[test]
+    fn new_buffer_is_zeroed() {
+        let buf = LockedBuffer::new(32).unwrap();
+        let bytes = buf.bytes_zeroizing();
+        assert!(bytes.iter().all(|&b| b == 0), "new buffer must be zeroed");
+    }
+
+    #[test]
+    fn new_buffer_has_correct_size() {
+        for &size in &[1_usize, 16, 32, 64, 128] {
+            let buf = LockedBuffer::new(size).unwrap();
+            assert_eq!(buf.size(), size);
+        }
+    }
+
+    #[test]
+    fn random_buffer_is_nonzero() {
+        let buf = LockedBuffer::random(32).unwrap();
+        let bytes = buf.bytes_zeroizing();
+        // Statistically certain with a real CSPRNG.
+        assert!(
+            bytes.iter().any(|&b| b != 0),
+            "random buffer must not be all zeros"
+        );
+    }
+
+    #[test]
+    fn from_bytes_copies_data() {
+        let input = b"hello locked world";
+        let buf = LockedBuffer::from_bytes(input.as_ref()).unwrap();
+        assert_eq!(buf.size(), input.len());
+        let bytes = buf.bytes_zeroizing();
+        assert_eq!(bytes.as_slice(), input.as_ref());
+    }
+
+    #[test]
+    fn wipe_zeroes_contents() {
+        let buf = LockedBuffer::from_bytes(b"secret to wipe").unwrap();
+        buf.wipe();
+        let bytes = buf.bytes_zeroizing();
+        assert!(
+            bytes.iter().all(|&b| b == 0),
+            "after wipe(), buffer must be zeroed"
+        );
+    }
+
+    #[test]
+    fn bytes_zeroizing_returns_independent_copy() {
+        let buf = LockedBuffer::from_bytes(b"copy test").unwrap();
+        let copy = buf.bytes_zeroizing();
+        // Wipe the original.
+        buf.wipe();
+        // The copy should still hold the original data.
+        assert_eq!(copy.as_slice(), b"copy test");
+    }
+
+    #[test]
+    fn freeze_and_melt_through_handle() {
+        let buf = LockedBuffer::new(16).unwrap();
+        buf.freeze().unwrap();
+        buf.melt().unwrap();
+        // After melt, should still be usable.
+        let bytes = buf.bytes_zeroizing();
+        assert_eq!(bytes.len(), 16);
+    }
+
+    #[test]
+    fn scramble_produces_nonzero() {
+        let buf = LockedBuffer::new(64).unwrap();
+        buf.scramble().unwrap();
+        let bytes = buf.bytes_zeroizing();
+        assert!(
+            bytes.iter().any(|&b| b != 0),
+            "scramble must fill with non-zero bytes"
+        );
+    }
+
+    #[test]
+    fn zeroize_all_at_shutdown_zeroes_all_registered() {
+        // Register multiple buffers, call zeroize_all, verify all are zeroed.
+        let b1 = LockedBuffer::from_bytes(b"secret1").unwrap();
+        let b2 = LockedBuffer::from_bytes(b"secret2").unwrap();
+        // Still holding strong refs to b1 and b2 while calling zeroize_all.
+        zeroize_all_registered_at_shutdown();
+        let bytes1 = b1.bytes_zeroizing();
+        let bytes2 = b2.bytes_zeroizing();
+        assert!(
+            bytes1.iter().all(|&b| b == 0),
+            "b1 must be zeroed after shutdown call"
+        );
+        assert!(
+            bytes2.iter().all(|&b| b == 0),
+            "b2 must be zeroed after shutdown call"
+        );
+    }
+
+    #[test]
+    fn concurrent_access_from_multiple_threads() {
+        use std::sync::Arc;
+        use std::thread;
+        let buf = Arc::new(LockedBuffer::new(64).unwrap());
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let b = Arc::clone(&buf);
+                thread::spawn(move || {
+                    // Each thread freezes, reads size, melts.
+                    b.freeze().ok();
+                    let _ = b.size();
+                    b.melt().ok();
+                    let _ = i;
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+    }
 }

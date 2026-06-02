@@ -1,7 +1,7 @@
 // Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use enclaveapp_core::metadata::{atomic_write, compute_meta_hmac_bytes};
 use subtle::ConstantTimeEq;
@@ -274,10 +274,10 @@ impl TamperEvidentHandle {
     }
 }
 
-fn sidecar_path(path: &Path) -> std::path::PathBuf {
+fn sidecar_path(path: &Path) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
     s.push(".hmac");
-    std::path::PathBuf::from(s)
+    PathBuf::from(s)
 }
 
 fn bytes_to_hex(bytes: &[u8]) -> String {
@@ -514,21 +514,21 @@ mod tests {
 
     #[test]
     fn path_to_label_is_64_chars() {
-        let label = path_to_label(std::path::Path::new("/some/path/file.txt"));
+        let label = path_to_label(Path::new("/some/path/file.txt"));
         assert_eq!(label.len(), 64);
         assert!(label.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
     fn path_to_label_is_stable() {
-        let p = std::path::Path::new("/stable/path");
+        let p = Path::new("/stable/path");
         assert_eq!(path_to_label(p), path_to_label(p));
     }
 
     #[test]
     fn path_to_label_differs_for_different_paths() {
-        let a = path_to_label(std::path::Path::new("/a"));
-        let b = path_to_label(std::path::Path::new("/b"));
+        let a = path_to_label(Path::new("/a"));
+        let b = path_to_label(Path::new("/b"));
         assert_ne!(a, b);
     }
 }

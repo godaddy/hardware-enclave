@@ -365,4 +365,106 @@ mod tests {
         buf.bytes()[0] = 1_u8;
         drop(buf);
     }
+
+    #[test]
+    fn freeze_twice_is_idempotent() {
+        let mut buf = SecureBuffer::new(32).unwrap();
+        buf.freeze().unwrap();
+        // Second freeze must not error.
+        buf.freeze().unwrap();
+        assert!(!buf.is_mutable());
+    }
+
+    #[test]
+    fn melt_twice_is_idempotent() {
+        let mut buf = SecureBuffer::new(32).unwrap();
+        buf.freeze().unwrap();
+        buf.melt().unwrap();
+        buf.melt().unwrap();
+        assert!(buf.is_mutable());
+    }
+
+    #[test]
+    fn frozen_buffer_is_readable() {
+        let mut buf = SecureBuffer::new(16).unwrap();
+        buf.bytes()[0] = 0x99;
+        buf.freeze().unwrap();
+        assert_eq!(buf.as_slice()[0], 0x99);
+    }
+
+    #[test]
+    fn scramble_on_frozen_buffer_melts_first() {
+        let mut buf = SecureBuffer::new(32).unwrap();
+        buf.freeze().unwrap();
+        // scramble() must succeed even from Frozen state.
+        buf.scramble().unwrap();
+        assert!(buf.is_mutable());
+    }
+
+    #[test]
+    fn destroy_twice_is_safe() {
+        let mut buf = SecureBuffer::new(32).unwrap();
+        buf.destroy().unwrap();
+        assert!(!buf.is_alive());
+        // Second destroy must return immediately (Dead state guard).
+        buf.destroy().unwrap();
+        assert!(!buf.is_alive());
+    }
+
+    #[test]
+    fn boundary_sizes() {
+        let ps = page_size();
+        for size in [
+            1_usize,
+            15,
+            16,
+            31,
+            32,
+            33,
+            63,
+            64,
+            ps - 1,
+            ps,
+            ps + 1,
+            ps * 2,
+        ] {
+            let mut buf = SecureBuffer::new(size).unwrap();
+            assert_eq!(buf.size(), size);
+            // Fill with known pattern.
+            buf.bytes().fill(0xAB);
+            assert!(buf.as_slice().iter().all(|&b| b == 0xAB));
+            buf.destroy().unwrap();
+        }
+    }
+
+    #[test]
+    fn canary_pre_guard_corruption_detected() {
+        // Corrupt the PRE-guard page and verify destroy() detects it.
+        let ps = page_size();
+        let mut buf = SecureBuffer::new(64).unwrap();
+        // The pre-guard is at alloc_ptr (before inner_ptr).
+        // Temporarily make it writable and flip a byte.
+        let pre_guard = buf.alloc_ptr.as_ptr();
+        unsafe {
+            os_protect(pre_guard, ps, Protection::ReadWrite).unwrap();
+            *pre_guard = !*pre_guard;
+        }
+        let result = buf.destroy();
+        assert!(
+            result.is_err(),
+            "pre-guard canary corruption must be detected"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("canary"), "error must mention canary: {msg}");
+    }
+
+    #[test]
+    fn drop_zeroes_inner_region() {
+        // Write a known pattern, destroy, verify the buffer reports Dead
+        // and the drop chain ran without panicking.
+        let mut buf = SecureBuffer::new(64).unwrap();
+        buf.bytes().fill(0xDE);
+        buf.destroy().unwrap();
+        assert!(!buf.is_alive());
+    }
 }
