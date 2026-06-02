@@ -1,6 +1,6 @@
 # enclaveapp-apple
 
-macOS Secure Enclave backend for libenclaveapp, using CryptoKit via a Swift bridge.
+macOS Secure Enclave backend for enclave, using CryptoKit via a Swift bridge.
 
 Keys are generated inside the Secure Enclave and never leave it. The private key material is non-exportable and device-bound. Only an opaque `dataRepresentation` handle is persisted to disk for reloading.
 

@@ -1,7 +1,7 @@
 // Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
-//! macOS Secure Enclave backend for libenclaveapp.
+//! enclave.
 //!
 //! Provides hardware-backed key management via CryptoKit Swift bridge:
 //! - **Signing keys** (`SecureEnclave.P256.Signing.PrivateKey`) behind the `signing` feature

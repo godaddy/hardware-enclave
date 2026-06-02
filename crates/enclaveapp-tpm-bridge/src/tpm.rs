@@ -1,7 +1,7 @@
 // Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
-//! TPM 2.0 storage operations via libenclaveapp.
+//! enclave.
 //!
 //! On Windows, this uses `enclaveapp-windows::TpmEncryptor` to perform
 //! hardware-backed ECIES encryption via the Windows CNG/NCrypt APIs.
@@ -217,7 +217,7 @@ mod platform {
 
         /// Read the public key for an existing (app_name, key_label)
         /// pair without `init_signing`. Same shape as the
-        /// `list_keys_for_app` standalone helper added in libenclaveapp
+        /// `list_keys_for_app` standalone helper added in enclave PR #110
         /// PR #110: lets the bridge server respond to a `public_key`
         /// request without going through TpmSigningStorage::new (which
         /// has create-if-missing semantics). If the key doesn't exist,

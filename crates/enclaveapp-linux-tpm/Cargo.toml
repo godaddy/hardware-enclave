@@ -1,6 +1,6 @@
 [package]
 name = "enclaveapp-linux-tpm"
-description = "Linux TPM 2.0 backend for libenclaveapp (tss-esapi)"
+description = "Linux TPM 2.0 backend for enclave (tss-esapi)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

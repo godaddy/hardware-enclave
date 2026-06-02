@@ -5,7 +5,7 @@
 
 ## Purpose
 
-`enclaveapp-app-storage` is the shared application-facing storage layer inside `libenclaveapp`.
+`enclaveapp-app-storage` is the shared application-facing storage layer inside `enclave`.
 
 It exists so consuming applications do not each need their own copies of:
 

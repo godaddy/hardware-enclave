@@ -1,7 +1,7 @@
 // Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
-//! WSL detection, shell configuration, and installation orchestration for libenclaveapp.
+//! enclave.
 //!
 //! Provides generic WSL integration that any enclave app can use:
 //! - WSL environment detection and distro enumeration

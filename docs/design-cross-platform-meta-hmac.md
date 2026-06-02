@@ -5,7 +5,7 @@ branch. Ready for review.
 **Updated:** 2026-05-06
 **Branch:** `cross-platform-meta-hmac` (rebased onto
 `deep-review-fixes`)
-**Depends on:** `deep-review-fixes` branch (PR godaddy/libenclaveapp#119,
+**Depends on:** `deep-review-fixes` branch (PR godaddy/enclave#119,
 godaddy/sshenc#193) — adds `MetaIntegrityMode` and the strict-mode
 load on the Linux keyring path.
 

@@ -117,7 +117,7 @@ fn create_key_with_flags(
     // Apps that opt into `StorageConfig::prefer_windows_hello_ux`
     // pass `AccessPolicy::None` here and gate via the application-
     // level `hello_gate::HelloGate` -- see the file-on-disk threat
-    // model in libenclaveapp's THREAT_MODEL.md.
+    // model in enclave's THREAT_MODEL.md.
     if policy != AccessPolicy::None {
         set_ui_policy(&key, policy)?;
     }

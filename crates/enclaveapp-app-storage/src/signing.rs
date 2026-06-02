@@ -17,7 +17,7 @@ use tracing::debug;
 /// High-level signing backend for sshenc.
 ///
 /// Provides platform detection and initialization, then exposes the
-/// underlying libenclaveapp signer and key manager for the app to use.
+/// underlying enclave signer and key manager for the app to use.
 /// Does NOT generate keys automatically — sshenc manages its own key lifecycle.
 pub struct AppSigningBackend {
     kind: BackendKind,
@@ -63,7 +63,7 @@ impl EnclaveKeyManager for BridgeSignerWrapper {
         // (it has load-or-create semantics). Explicitly call it
         // first, then read the resulting public key. We can't rely
         // on `self.public_key` to drive the create as a side effect
-        // anymore -- as of libenclaveapp PR #114 `bridge_public_key`
+        // anymore -- as of enclave PR #114 `bridge_public_key`
         // is standalone and only reads existing keys.
         enclaveapp_bridge::bridge_init_signing(
             &self.bridge_path,
