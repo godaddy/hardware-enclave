@@ -237,6 +237,10 @@ impl TieredPool {
     /// one mlock'd page per tier. Tier 0's slab initialises the Coffer.
     pub fn new(config: TieredPoolConfig) -> Result<Self> {
         // Harden the process as early as possible (idempotent).
+        // Skipped in test builds: mitigations like ProcessStrictHandleCheckPolicy
+        // and ProcessExtensionPointDisablePolicy can interfere with the test runner
+        // and spawned threads, causing hangs on Windows CI.
+        #[cfg(not(test))]
         enclaveapp_core::process::harden_process();
 
         let ps = page_size();
