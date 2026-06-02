@@ -4,7 +4,7 @@
 **Date:** 2026-05-06
 **Author:** Jay Gowdy
 **Supersedes (in part):** `design-cross-platform-meta-hmac.md` §"Migration"
-**Repos:** `libenclaveapp`, `sshenc`
+**Repos:** `enclave`, `sshenc`
 
 ## TL;DR
 
@@ -157,14 +157,14 @@ Post-design, the threat model entry becomes:
 
 | Step | Repo | Description |
 | ---- | ---- | ----------- |
-| 1 | libenclaveapp | Add keychain-attribute storage on all platforms. New keygen writes both attribute and sidecar. |
-| 2 | libenclaveapp | Read path uses keychain attribute as authority. Sidecar becomes cache. |
-| 3 | libenclaveapp | Remove `migrate_meta_to_hmac` call from `verify_meta_integrity`. Hard error on legacy state. |
+| 1 | enclave | Add keychain-attribute storage on all platforms. New keygen writes both attribute and sidecar. |
+| 2 | enclave | Read path uses keychain attribute as authority. Sidecar becomes cache. |
+| 3 | enclave | Remove `migrate_meta_to_hmac` call from `verify_meta_integrity`. Hard error on legacy state. |
 | 4 | sshenc | Add `sshenc migrate-meta` subcommand with interactive fingerprint confirmation. |
-| 5 | libenclaveapp + sshenc | Update threat model doc to reflect the new guarantees. |
+| 5 | enclave + sshenc | Update threat model doc to reflect the new guarantees. |
 | 6 | sshenc | Release notes call out the migrate-meta requirement for upgrading existing installs. |
 
-Steps 1–3 ship as one libenclaveapp PR. Step 4 ships as the matching sshenc PR (depends on the libenclaveapp release tag bumping). Steps 5–6 are doc-only.
+Steps 1–3 ship as one enclave PR. Step 4 ships as the matching sshenc PR (depends on the enclave release tag bumping). Steps 5–6 are doc-only.
 
 ## Test plan
 
@@ -316,7 +316,7 @@ short-circuited by ambient automation.
 
 ## Cross-platform follow-ups
 
-The macOS-first PR (libenclaveapp #122 + sshenc #196) closes the
+The macOS-first PR (enclave #122 + sshenc #196) closes the
 auto-migrate hole **for sshenc on macOS only**. Three follow-up
 tracks remain. Each is a self-contained PR; the macOS implementation
 is the reference template for files / function shapes.
@@ -335,7 +335,7 @@ Reference points to mirror:
 ### Track 1: Windows TPM (CNG) — **DONE**
 
 **Crate:** `enclaveapp-windows`. Landed alongside this design doc;
-see the `windows-tpm-trust-anchor` branch on libenclaveapp and
+see the `windows-tpm-trust-anchor` branch on enclave and
 sshenc.
 
 - **Per-key tag storage.** Per-key Credential Manager entry under

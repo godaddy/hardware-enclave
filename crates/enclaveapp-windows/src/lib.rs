@@ -1,7 +1,7 @@
 // Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
-//! Windows TPM 2.0 backend for libenclaveapp via CNG (NCrypt/BCrypt).
+//! enclave via CNG (NCrypt/BCrypt).
 //!
 //! This crate provides hardware-backed key management using the Windows
 //! Microsoft Platform Crypto Provider (TPM 2.0). It supports:

@@ -183,11 +183,11 @@ bash run-matrix-tests.sh "WSL2 Ubuntu"
 
 The following issues were found during testing and fixed:
 
-1. **ECIES encrypt broken on Windows 11 build 26200** — `BCryptDeriveKey` HASH KDF defaulted to SHA-1 instead of SHA-256. Fixed in libenclaveapp#16.
+1. **ECIES encrypt broken on Windows 11 build 26200** — `BCryptDeriveKey` HASH KDF defaulted to SHA-1 instead of SHA-256. Fixed in enclave#16.
 2. **`sso-jwt shell-init powershell` not supported** — Fixed in sso-jwt#16.
-3. **WSL signing path probed libtss2 before detecting WSL** — Caused noisy TCTI errors. Fixed in libenclaveapp#25.
-4. **Musl builds stored keys as plaintext** — Fixed in libenclaveapp#25 (refuses without keyring).
-5. **GNU binaries required glibc 2.39** — Pinned CI to ubuntu-22.04. Fixed in libenclaveapp#28.
+3. **WSL signing path probed libtss2 before detecting WSL** — Caused noisy TCTI errors. Fixed in enclave#25.
+4. **Musl builds stored keys as plaintext** — Fixed in enclave#25 (refuses without keyring).
+5. **GNU binaries required glibc 2.39** — Pinned CI to ubuntu-22.04. Fixed in enclave#28.
 6. **No `--keyring` flag for testing** — Added to all apps (sshenc#27, awsenc#23, sso-jwt#22).
-7. **Signing bridge missing for WSL** — Added to bridge protocol (libenclaveapp#27).
+7. **Signing bridge missing for WSL** — Added to bridge protocol (enclave#27).
 8. **npmenc macOS test failures** — Temp dir path canonicalization (npmenc#8, #9).

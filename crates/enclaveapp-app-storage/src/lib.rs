@@ -92,7 +92,7 @@ pub use enclaveapp_core::types::{AccessPolicy, KeyType};
 pub enum WindowsSoftwareFallback {
     /// Never fall back from Windows TPM-backed storage.
     Disabled,
-    /// Fall back only when libenclaveapp detects both a TPM failure
+    /// Fall back only when enclave detects both a TPM failure
     /// and a VM environment. This is intended for virtualized hosts
     /// that lack TPM 2.0 passthrough, while keeping physical machines
     /// fail-closed instead of silently downgrading.
@@ -207,7 +207,7 @@ pub struct StorageConfig {
     /// (Windows only) Whether a VM host without usable TPM 2.0
     /// may use a per-user DPAPI-backed software key instead of failing.
     ///
-    /// The downgrade decision itself is made inside libenclaveapp's
+    /// The downgrade decision itself is made inside the enclave crate's
     /// Windows backend using local machine signals: this field only
     /// opts the application into the policy. There is no environment
     /// variable override for production binaries.

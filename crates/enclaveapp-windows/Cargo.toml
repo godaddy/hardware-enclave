@@ -1,6 +1,6 @@
 [package]
 name = "enclaveapp-windows"
-description = "Windows TPM 2.0 backend for libenclaveapp (CNG/NCrypt)"
+description = "Windows TPM 2.0 backend for enclave (CNG/NCrypt)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

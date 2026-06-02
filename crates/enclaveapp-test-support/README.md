@@ -1,6 +1,6 @@
 # enclaveapp-test-support
 
-Mock implementations of all libenclaveapp traits for testing without hardware.
+Mock implementations of all enclave traits for testing without hardware.
 
 ## Usage
 

@@ -457,13 +457,13 @@ impl std::fmt::Display for BackendKind {
 /// Search for a WSL TPM bridge executable.
 ///
 /// Tries in order:
-/// 1. `enclaveapp_bridge::find_bridge(app_name)` (standard libenclaveapp discovery)
+/// 1. `enclaveapp_bridge::find_bridge(app_name)` (standard enclave discovery)
 /// 2. Auto-derived paths: `/mnt/c/Program Files/{app_name}/{app_name}-tpm-bridge.exe`
 ///    and `/mnt/c/ProgramData/{app_name}/{app_name}-tpm-bridge.exe`
 /// 3. Any absolute extra paths provided by the caller as explicit overrides
 #[cfg(target_os = "linux")]
 pub fn find_bridge_executable(app_name: &str, extra_paths: &[String]) -> Option<PathBuf> {
-    // Standard libenclaveapp discovery.
+    // Standard enclave discovery.
     if let Some(path) = enclaveapp_bridge::find_bridge(app_name) {
         return Some(path);
     }

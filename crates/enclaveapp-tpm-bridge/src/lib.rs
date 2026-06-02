@@ -215,7 +215,7 @@ pub fn handle_request(
             // key_label (defaults to "default") -- so any read-only
             // probe of a non-existent key created a `default` signing
             // key as a side effect. Same fix shape as `list_keys`
-            // (libenclaveapp PR #110): a static `public_key_for_app`
+            // (enclave PR #110): a static `public_key_for_app`
             // helper that just instantiates a TpmSigner without going
             // through TpmSigningStorage::new's ensure_signing_key.
             match TpmSigningStorage::public_key_for_app(app_name, key_label) {

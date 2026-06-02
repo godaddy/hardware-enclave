@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Instructions for AI agents (Claude Code, Copilot, Cursor, etc.) working with libenclaveapp.
+Instructions for AI agents (Claude Code, Copilot, Cursor, etc.) working with the Enclave crate.
 
 ## Protection Class Safety Rules
 

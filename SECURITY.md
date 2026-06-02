@@ -2,12 +2,12 @@
 
 ## Reporting Vulnerabilities
 
-If you discover a security vulnerability in libenclaveapp, report it privately.
+If you discover a security vulnerability in the Enclave crate, report it privately.
 
 **Do not open a public GitHub issue for security vulnerabilities.**
 
 Email: Report via GitHub's private vulnerability reporting feature on the
-[libenclaveapp repository](https://github.com/godaddy/libenclaveapp/security/advisories/new),
+[enclave repository](https://github.com/godaddy/enclave/security/advisories/new),
 or contact the maintainer directly.
 
 Include:
@@ -30,7 +30,7 @@ Only the latest release receives security fixes.
 
 ## Security Model Summary
 
-libenclaveapp provides hardware-backed key management via the Secure Enclave
+enclave provides hardware-backed key management via the Secure Enclave
 (macOS), TPM 2.0 (Windows/Linux), and a keyring fallback:
 
 - **Private keys never leave the hardware.** Secure Enclave and TPM keys are
@@ -44,7 +44,7 @@ libenclaveapp provides hardware-backed key management via the Secure Enclave
   Linux TPM, software) has different security properties documented in
   [THREAT_MODEL.md](THREAT_MODEL.md).
 
-### What libenclaveapp does NOT protect against
+### What enclave does NOT protect against
 
 - Root/admin compromise (root can bypass all software protections)
 - Kernel exploits on any platform
@@ -56,7 +56,7 @@ See [THREAT_MODEL.md](THREAT_MODEL.md) for a detailed analysis.
 
 ## Dependencies
 
-libenclaveapp uses a conservative set of dependencies. Key external crates:
+enclave uses a conservative set of dependencies. Key external crates:
 
 - `p256`, `ecdsa`: Elliptic curve operations (keyring backend)
 - `aes-gcm`: Authenticated encryption (keyring backend ECIES)

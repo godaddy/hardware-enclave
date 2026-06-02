@@ -1,6 +1,6 @@
 # enclaveapp-wsl
 
-WSL detection and shell configuration for libenclaveapp.
+WSL detection and shell configuration for enclave.
 
 Provides generic, app-name-parameterized WSL integration so that sshenc, awsenc, and sso-jwt can share the same detection and shell config injection logic.
 

@@ -1,15 +1,15 @@
-# macOS .app bundle distribution for libenclaveapp consumers
+# macOS .app bundle distribution for enclave consumers
 
 Status: planned — describes the cross-cutting work to enable the
 Data Protection keychain (and therefore the wrapping-key
-`.userPresence` ACL) for libenclaveapp consumers shipped via
+`.userPresence` ACL) for enclave consumers shipped via
 Homebrew. As of 2026-04-27, only sshenc has a Developer ID signed
 release pipeline; this doc captures the next step that brings the
 full security model into reach.
 
 ## Why this matters
 
-The libenclaveapp wrapping-key path stores a 32-byte AES key in the
+The enclave wrapping-key path stores a 32-byte AES key in the
 macOS login keychain to encrypt SE-handle blobs at rest. The path
 is meant to install a `kSecAttrAccessControl(.userPresence)` ACL on
 that wrapping-key keychain item so a same-UID attacker who can read
@@ -68,7 +68,7 @@ Per-app (not shared) so:
    `enclaveapp-apple/src/keychain_wrap.rs` where the keychain service
    is `com.godaddy.<app_name>`.
 
-libenclaveapp itself does not need an App ID — it's a library, doesn't
+enclave itself does not need an App ID — it's a library, doesn't
 ship binaries.
 
 ## Per-consumer Apple developer portal setup
@@ -129,7 +129,7 @@ Should print an XML plist whose `Entitlements` dict contains
 and whose `TeamIdentifier` matches your team. If either is wrong, go
 back and recreate.
 
-## Pipeline mechanics (the libenclaveapp side)
+## Pipeline mechanics (the enclave side)
 
 The reusable release workflow gains:
 
@@ -234,7 +234,7 @@ signing pipeline uses.
 
 ## Rollout order
 
-1. **libenclaveapp PR** — pipeline changes (this doc + the workflow
+1. **enclave PR** — pipeline changes (this doc + the workflow
    updates). Lands first.
 2. **sshenc PR** — first consumer to opt in. Apple portal setup for
    `com.godaddy.sshenc`, secret upload, three-line `release.yml`
@@ -244,5 +244,5 @@ signing pipeline uses.
    sshenc proves the pipeline. Each is ~3 file changes per repo plus
    the Apple portal step.
 
-The libenclaveapp pipeline change is opt-in via `macos_bundle_id`,
+The enclave pipeline change is opt-in via `macos_bundle_id`,
 so it doesn't disturb consumers that haven't migrated yet.

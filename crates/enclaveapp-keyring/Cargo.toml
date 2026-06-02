@@ -1,6 +1,6 @@
 [package]
 name = "enclaveapp-keyring"
-description = "Keyring-backed P-256 key backend for libenclaveapp (Linux with system keyring)"
+description = "Keyring-backed P-256 key backend for enclave (Linux with system keyring)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

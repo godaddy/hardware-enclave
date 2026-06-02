@@ -1,6 +1,6 @@
-# libenclaveapp Diagrams
+# enclave Diagrams
 
-These diagrams are text-based Mermaid sources for the main `libenclaveapp`
+These diagrams are text-based Mermaid sources for the main `enclave`
 architecture and flows. They are intended to be maintained with the code and
 rendered by GitHub, Mermaid CLI, or other Mermaid-compatible tools.
 

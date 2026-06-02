@@ -1,6 +1,6 @@
 [package]
 name = "enclaveapp-wsl"
-description = "WSL detection and shell configuration for libenclaveapp"
+description = "WSL detection and shell configuration for enclave"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

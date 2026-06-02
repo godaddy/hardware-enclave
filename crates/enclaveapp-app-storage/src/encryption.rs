@@ -167,7 +167,7 @@ impl AppEncryptionStorage {
     /// Initialize encryption storage with automatic platform detection.
     ///
     /// 1. Detects the current platform (macOS/Windows/Linux/WSL)
-    /// 2. Initializes the appropriate libenclaveapp backend
+    /// 2. Initializes the appropriate enclave backend
     /// 3. Checks if a key with the given label exists
     /// 4. If not, generates a new key with the configured access policy
     /// 5. If yes, checks that the existing key's policy matches;

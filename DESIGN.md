@@ -1,4 +1,4 @@
-# libenclaveapp Design Document
+# Enclave Design Document
 
 ## Goal
 
@@ -22,7 +22,7 @@ The current workspace supports four active consumers:
 ## Workspace layout
 
 ```
-libenclaveapp/
+enclave/
   crates/
     enclaveapp-core/          Traits, types, metadata, shared utilities, process hardening
     enclaveapp-app-storage/   App-level bootstrap for encryption/signing
@@ -89,7 +89,7 @@ Beyond the backends, a handful of crates provide cross-consumer utilities:
 
 ### Process hardening
 
-`enclaveapp_core::process::harden_process()` **must be called as the first line of every enclave app binary's `main()`** — before argument parsing, before any environment inspection, before any decrypt. This is non-optional for any binary that consumes `libenclaveapp`. By definition, a libenclaveapp consumer holds hardware-backed secret material in process memory; the protections have to be in place before that material can land. See the [consuming-app integration checklist](CLAUDE.md#consuming-app-integration-checklist) in `CLAUDE.md` for the full set of expectations on consumers.
+`enclaveapp_core::process::harden_process()` **must be called as the first line of every enclave app binary's `main()`** — before argument parsing, before any environment inspection, before any decrypt. This is non-optional for any binary that consumes `enclave`. By definition, a enclave consumer holds hardware-backed secret material in process memory; the protections have to be in place before that material can land. See the [consuming-app integration checklist](CLAUDE.md#consuming-app-integration-checklist) in `CLAUDE.md` for the full set of expectations on consumers.
 
 `harden_process()` applies, best-effort (failures warn but don't abort):
 
@@ -190,7 +190,7 @@ Signing keys are long-lived identity keys (e.g., SSH keys). At Levels 1-3, the h
 | **2** | Windows TPM 2.0 | **The TPM hardware.** CNG sends signing requests to the TPM via NCrypt. | **No** — key is a non-exportable TPM object. | Windows Hello (biometric/PIN) enforced per-signature via `NCRYPT_UI_POLICY`. | TPM 2.0 chip. |
 | **3** | Linux TPM 2.0 | **The TPM hardware.** Signing performed by the TPM via `tss-esapi`. | **No** — key is TPM-resident. | Not enforced (no standard Linux biometric API). | TPM 2.0 device (`/dev/tpmrm0`). glibc only. |
 | **4** | Software (Linux glibc, keyring) | **Software.** The P-256 private key is decrypted from the keyring into memory and used for signing via the `p256` crate. | **Yes (encrypted at rest)** — P-256 private key on disk, encrypted via system keyring (D-Bus Secret Service / GNOME Keyring / KWallet). | Not enforced. | `~/.config/{app}/keys/` encrypted via keyring. |
-| **—** | `enclaveapp-test-software` | **Software, plaintext.** Test-only. Not used in any shipped binary. Never selected at runtime. | Yes (plaintext). | Not enforced. | Exists only to exercise the trait plumbing in unit tests. Linux musl builds are **not a supported production target** for libenclaveapp. |
+| **—** | `enclaveapp-test-software` | **Software, plaintext.** Test-only. Not used in any shipped binary. Never selected at runtime. | Yes (plaintext). | Not enforced. | Exists only to exercise the trait plumbing in unit tests. Linux musl builds are **not a supported production target** for enclave. |
 
 #### Encryption key security
 
@@ -210,7 +210,7 @@ The blast radius of encryption key compromise is further bounded by the expirati
 
 All supported macOS hardware (Apple Silicon) has a Secure Enclave, and **CryptoKit's `SecureEnclave.P256` APIs work without code signing or entitlements**. Both signed and unsigned builds get full SE access — the SE creates the key and performs all signing/key agreement operations. The private key material never leaves the hardware.
 
-The `com.apple.developer.secure-enclave` entitlement is a **Security.framework** concept for Keychain-stored SE keys (`SecItemAdd` with `kSecAttrTokenIDSecureEnclave`). Since libenclaveapp uses CryptoKit's `dataRepresentation` for key persistence (not Security.framework), the entitlement is not required.
+The `com.apple.developer.secure-enclave` entitlement is a **Security.framework** concept for Keychain-stored SE keys (`SecItemAdd` with `kSecAttrTokenIDSecureEnclave`). Since enclave uses CryptoKit's `dataRepresentation` for key persistence (not Security.framework), the entitlement is not required.
 
 **Handle protection for unsigned apps.** The SE's `dataRepresentation` is an opaque handle blob that allows the same device's SE to reconstruct the key reference. While the private key itself cannot be extracted from this blob, the blob is stored as a file on disk — and another process running as the same user could copy it and use it to request SE operations.
 
@@ -234,7 +234,7 @@ There is one code path. `CryptoKit`'s `SecureEnclave.P256.*.PrivateKey` APIs wor
 - **Trusted signing identity** (e.g. Apple Developer ID): zero prompts across rebuilds — the keychain scopes access by identity, not hash.
 - **Different binary at a different path**: always prompted, regardless of signing.
 
-A second "entitled" path (`SecKeyCreateRandomKey` with `kSecAttrTokenIDSecureEnclave` + `kSecAttrIsPermanent`, storing the SE key directly in the Keychain and eliminating the `.handle` file) is **blocked on distribution**. The required `keychain-access-groups` entitlement is AMFI-restricted and needs a provisioning profile — unavailable to Homebrew, `cargo install`, and ad-hoc / self-signed binaries. See `THREAT_MODEL.md` for details. For the distribution models libenclaveapp targets, the Path-2 wrapping already closes the same-UID `.handle` theft threat.
+A second "entitled" path (`SecKeyCreateRandomKey` with `kSecAttrTokenIDSecureEnclave` + `kSecAttrIsPermanent`, storing the SE key directly in the Keychain and eliminating the `.handle` file) is **blocked on distribution**. The required `keychain-access-groups` entitlement is AMFI-restricted and needs a provisioning profile — unavailable to Homebrew, `cargo install`, and ad-hoc / self-signed binaries. See `THREAT_MODEL.md` for details. For the distribution models enclave targets, the Path-2 wrapping already closes the same-UID `.handle` theft threat.
 
 #### Linux
 

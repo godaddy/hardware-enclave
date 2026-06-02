@@ -1,6 +1,6 @@
 [package]
 name = "enclaveapp-apple"
-description = "macOS Secure Enclave backend for libenclaveapp (CryptoKit)"
+description = "macOS Secure Enclave backend for enclave (CryptoKit)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
