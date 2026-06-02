@@ -48,21 +48,50 @@ pub fn create_auth(config: &EnclaveConfig) -> Result<AuthHandle> {
     Ok(AuthHandle::new(kind))
 }
 
-/// Create a hardware security key handle.
+/// Create a [`SecurityKeyHandle`] for the current platform.
 ///
-/// The handle is valid on all platforms; check
-/// [`SecurityKeyHandle::is_available()`] before generating or signing since
-/// the underlying WebAuthn platform authenticator is only present on
-/// Windows and WSL2.
+/// Unlike the other factory functions, this is **infallible** — it always
+/// returns a handle regardless of whether the platform authenticator is
+/// available. Call [`SecurityKeyHandle::is_available()`] to check at runtime
+/// whether Windows Hello is reachable before calling
+/// [`generate`][SecurityKeyHandle::generate] or [`sign`][SecurityKeyHandle::sign].
+///
+/// This design allows the handle to be constructed once at startup and
+/// re-used across multiple operations without repeating the availability check.
 pub fn create_security_key(config: &EnclaveConfig) -> SecurityKeyHandle {
     crate::security_key::make_security_key_handle(config)
 }
 
 /// Create a tamper-evident handle for the given app.
-/// Loads (or generates) the per-app HMAC key from the platform secure store.
+///
+/// The per-app HMAC key is loaded from the platform secure store
+/// (Keychain on macOS, DPAPI on Windows, D-Bus Secret Service on Linux).
+/// On first use the key is created, which on macOS may prompt for the
+/// login keychain password if the binary is unsigned.
+///
+/// **For testing and development** where no interactive prompt is acceptable,
+/// use [`create_tamper_evident_ephemeral`] instead, which uses a random
+/// in-memory key and never touches the platform secure store.
 pub fn create_tamper_evident(app_name: &str) -> Result<TamperEvidentHandle> {
     let effective = enclaveapp_core::signing::ensure_safe_app_name(app_name);
     Ok(TamperEvidentHandle::new(effective))
+}
+
+/// Create a tamper-evident handle with an ephemeral random HMAC key.
+///
+/// The key is generated from `OsRng` and held in memory only — no platform
+/// secure store (Keychain / DPAPI / Secret Service) is accessed. This means:
+///
+/// - **No interactive prompts.** Safe to call from CI, tests, and examples.
+/// - **Key is not persisted.** Files written with this handle cannot be
+///   verified after the process restarts. Use [`create_tamper_evident`] for
+///   persistent integrity protection.
+///
+/// Suitable for: automated tests, CI pipelines, development examples, and
+/// any non-production scenario where prompt-free operation is required.
+pub fn create_tamper_evident_ephemeral(app_name: &str) -> TamperEvidentHandle {
+    let effective = enclaveapp_core::signing::ensure_safe_app_name(app_name);
+    TamperEvidentHandle::new_ephemeral(effective)
 }
 
 // ── internal helpers ──────────────────────────────────────────────────

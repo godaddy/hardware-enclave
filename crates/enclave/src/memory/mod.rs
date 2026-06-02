@@ -20,6 +20,10 @@ pub use secure_buffer::SecureBuffer;
 /// Zeroize all registered LockedBuffers. Call at shutdown.
 ///
 /// Thin wrapper around [`zeroize_all_registered_at_shutdown`] for backward compatibility.
+#[deprecated(
+    since = "0.1.0",
+    note = "use zeroize_all_registered_at_shutdown() instead"
+)]
 pub fn zeroize_all() {
     zeroize_all_registered_at_shutdown();
 }

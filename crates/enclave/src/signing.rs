@@ -34,6 +34,14 @@ impl SignerHandle {
     }
 
     /// Generate a new P-256 signing key. Returns uncompressed SEC1 public key.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::DuplicateLabel`] if a key with this label already exists.
+    /// - [`Error::InvalidLabel`] if the label is empty, too long, or contains illegal characters.
+    /// - [`Error::PolicyNotSupported`] if the backend cannot enforce the requested `AccessPolicy`.
+    /// - [`Error::RequiresSigning`] if `policy` requires a code-signed binary.
+    /// - [`Error::KeyOperation`] for underlying hardware or I/O failures.
     pub fn generate_key(&self, label: &str, policy: AccessPolicy) -> Result<Vec<u8>> {
         // On macOS, BiometricOnly and PasswordOnly are hardware-enforced by the SE.
         // On other platforms these policies are not hardware-enforceable; the backend
@@ -53,17 +61,36 @@ impl SignerHandle {
             .map_err(Error::from)
     }
 
-    /// Sign `data` (SHA-256 applied internally). Returns DER-encoded ECDSA signature.
+    /// Sign `data` (SHA-256 applied internally). Returns a DER-encoded ECDSA
+    /// P-256 signature.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::KeyNotFound`] if no key with this label exists.
+    /// - [`Error::AuthDenied`] if the keychain ACL denies access to the wrapping key.
+    /// - [`Error::AuthRequired`] if the device is locked or the GUI session is absent.
+    /// - [`Error::UserCancelled`] if the user dismissed a biometric prompt.
+    /// - [`Error::SignFailed`] for underlying hardware or crypto failures.
     pub fn sign(&self, label: &str, data: &[u8]) -> Result<Vec<u8>> {
         self.backend.signer().sign(label, data).map_err(Error::from)
     }
 
-    /// Sign with optional user-presence prompt.
+    /// Sign `data` with an optional user-presence prompt.
     ///
     /// - `PresenceMode::Strict` on a platform where `presence_available()` is false
     ///   returns `Error::PresenceNotAvailable`.
     /// - `PresenceMode::Cached` or `PresenceMode::None` always falls through to a
     ///   plain sign on non-macOS platforms (no error).
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::PresenceNotAvailable`] if `opts.mode` is `Strict` and the platform
+    ///   has no user-presence support.
+    /// - [`Error::KeyNotFound`] if no key with this label exists.
+    /// - [`Error::AuthDenied`] if the keychain ACL denies access to the wrapping key.
+    /// - [`Error::AuthRequired`] if the device is locked or the GUI session is absent.
+    /// - [`Error::UserCancelled`] if the user dismissed a biometric prompt.
+    /// - [`Error::SignFailed`] for underlying hardware or crypto failures.
     pub fn sign_with_presence(
         &self,
         label: &str,
@@ -88,6 +115,7 @@ impl SignerHandle {
         false
     }
 
+    /// List all signing keys in this app's key store.
     pub fn list_keys(&self) -> Result<Vec<KeyInfo>> {
         let labels = self
             .backend
@@ -108,6 +136,7 @@ impl SignerHandle {
         Ok(infos)
     }
 
+    /// Permanently delete a signing key and its metadata.
     pub fn delete_key(&self, label: &str) -> Result<()> {
         self.backend
             .key_manager()
@@ -115,6 +144,7 @@ impl SignerHandle {
             .map_err(Error::from)
     }
 
+    /// Return `true` if a key with this label exists.
     pub fn key_exists(&self, label: &str) -> Result<bool> {
         self.backend
             .key_manager()
@@ -122,6 +152,7 @@ impl SignerHandle {
             .map_err(Error::from)
     }
 
+    /// Atomically rename a signing key.
     pub fn rename_key(&self, old_label: &str, new_label: &str) -> Result<()> {
         self.backend
             .key_manager()
@@ -129,10 +160,13 @@ impl SignerHandle {
             .map_err(Error::from)
     }
 
+    /// Evict the cached wrapping-key / LAContext for `label`, forcing the next sign to
+    /// re-authenticate. Has no effect on platforms without presence caching.
     pub fn evict_presence_cache(&self, label: &str) {
         self.backend.signer().evict_wrapping_key_cache(label);
     }
 
+    /// Which hardware security backend backs this handle.
     pub fn backend_kind(&self) -> BackendKind {
         self.backend_kind
     }

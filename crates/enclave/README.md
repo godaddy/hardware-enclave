@@ -48,6 +48,7 @@ region is zeroized before unmapping.
 ```rust
 use enclave::SecureBuffer;
 
+let key_material = [0u8; 32]; // your 32-byte secret
 let mut buf = SecureBuffer::new(32)?;
 buf.bytes().copy_from_slice(&key_material);
 buf.freeze()?;       // PROT_READ — prevents accidental mutation
@@ -65,6 +66,7 @@ global registry for shutdown cleanup.
 
 ```rust
 use enclave::{LockedBuffer, zeroize_all_registered_at_shutdown};
+use zeroize::Zeroizing;
 
 let buf = LockedBuffer::random(32)?;              // OsRng-filled
 let copy: Zeroizing<Vec<u8>> = buf.bytes_zeroizing();
@@ -198,6 +200,35 @@ On Linux: returns `Err(PresenceNotAvailable)`.
 
 ---
 
+## Hardware security keys (FIDO2 / WebAuthn)
+
+`SecurityKeyHandle` manages FIDO2 platform authenticator credentials backed by
+the Windows Hello TPM (Windows native) or the Windows TPM via a JSON-RPC bridge
+(WSL2). Returns `NotAvailable` on macOS and non-WSL Linux.
+
+```rust
+use enclave::{create_security_key, EnclaveConfig};
+
+let config = EnclaveConfig::new("myapp", "default");
+let sk = create_security_key(&config);
+
+if sk.is_available() {
+    // Fires a Windows Hello gesture; creates a TPM-bound FIDO2 credential.
+    let info = sk.generate("ssh-key", Some("user@host"))?;
+
+    // sign() also fires Hello. Returns the full FIDO2 assertion.
+    let sig = sk.sign("ssh-key", data_to_sign)?;
+    // sig.signature_der — DER ECDSA P-256
+    // sig.flags         — User Present / User Verified bits
+    // sig.counter       — monotonic TPM counter
+}
+```
+
+`SecurityKeySignature` contains everything needed to build an
+`sk-ecdsa-sha2-nistp256@openssh.com` SSH signature wire format.
+
+---
+
 ## Tamper-evident files
 
 HMAC-SHA-256 protected files. The per-app HMAC key lives in the platform secure store
@@ -295,6 +326,32 @@ Notable variants:
 - `PolicyNotSupported { policy }` — backend cannot enforce the requested `AccessPolicy`
 - `PresenceNotAvailable` — `sign_with_presence(Strict, ...)` on a platform without biometric
 - `NotImplemented { feature }` — API stub (see individual method docs)
+
+---
+
+## Running the examples
+
+Each example runs with real hardware or with a software mock for CI/development:
+
+```bash
+# Memory protection (no hardware required)
+cargo run --example memory_protection
+
+# Tamper-evident files (no hardware required)
+cargo run --example integrity
+
+# Signing with hardware (Touch ID / TPM)
+cargo run --example signing
+
+# Signing with software mock (no hardware, CI-safe)
+ENCLAVE_MOCK=1 cargo run --example signing
+
+# Encryption with software mock
+ENCLAVE_MOCK=1 cargo run --example encryption
+
+# Run all CI-safe examples via cargo test
+ENCLAVE_MOCK=1 cargo test --test examples_ci
+```
 
 ---
 

@@ -5,15 +5,21 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::types::AccessPolicy;
-use enclaveapp_app_storage::{StorageConfig, WindowsSoftwareFallback};
+use enclaveapp_app_storage::StorageConfig;
+pub use enclaveapp_app_storage::WindowsSoftwareFallback;
 
-/// Platform-specific escape hatches. Use PlatformConfig::Default for the common case.
+/// Platform-specific escape hatches. Use `PlatformConfig::Default` for the common case.
 #[derive(Debug, Clone, Default)]
 pub enum PlatformConfig {
+    /// Auto-detect the platform and apply sensible defaults: no wrapping-key user-presence,
+    /// no keychain access group, standard keys directory.
     #[default]
     Default,
+    /// macOS-specific overrides. See [`MacOsConfig`].
     MacOs(MacOsConfig),
+    /// Windows-specific overrides. See [`WindowsConfig`].
     Windows(WindowsConfig),
+    /// Linux-specific overrides. See [`LinuxConfig`].
     Linux(LinuxConfig),
 }
 
@@ -24,7 +30,12 @@ pub enum PlatformConfig {
 /// when updating the crate version to check for new fields.
 #[derive(Debug, Clone)]
 pub struct MacOsConfig {
+    /// Protect the wrapping key with a `.userPresence` ACL (requires `keychain_access_group`
+    /// and the `keychain-access-groups` entitlement). Each decrypt/sign will prompt once per
+    /// `wrapping_key_cache_ttl`.
     pub wrapping_key_user_presence: bool,
+    /// How long a loaded wrapping key may be reused without another LAContext prompt.
+    /// `Duration::ZERO` means prompt on every operation.
     pub wrapping_key_cache_ttl: Duration,
     /// `<TEAMID>.<group>` access group. Requires keychain-access-groups entitlement.
     pub keychain_access_group: Option<String>,
@@ -50,8 +61,14 @@ impl Default for MacOsConfig {
 /// when updating the crate version to check for new fields.
 #[derive(Debug, Clone)]
 pub struct WindowsConfig {
+    /// Surface a Windows Hello biometric/PIN prompt at encrypt/decrypt time.
+    /// When `false`, uses the legacy CryptUI password dialog.
     pub prefer_windows_hello_ux: bool,
+    /// Whether a VM without a usable TPM may fall back to DPAPI-backed software keys.
     pub software_fallback: WindowsSoftwareFallback,
+    /// Optional application-layer AES-256-GCM key applied around DPAPI when the
+    /// software fallback is in use. Defeats automated DPAPI oracle tools that don't
+    /// carry knowledge of this binary.
     pub dpapi_app_key: Option<[u8; 32]>,
 }
 
@@ -65,9 +82,12 @@ impl Default for WindowsConfig {
     }
 }
 
+/// Linux-specific configuration.
 #[derive(Debug, Clone, Default)]
 pub struct LinuxConfig {
+    /// Force the software keyring backend, bypassing WSL bridge detection and TPM probing.
     pub force_keyring: bool,
+    /// Additional paths to search for the Windows TPM bridge executable (WSL only).
     pub extra_bridge_paths: Vec<String>,
 }
 
@@ -89,6 +109,8 @@ pub struct EnclaveConfig {
 }
 
 impl EnclaveConfig {
+    /// Create a config with sensible defaults. The binary's signing state is detected
+    /// automatically; unsigned binaries get `-unsigned` appended to `app_name`.
     pub fn new(app_name: impl Into<String>, default_key_label: impl Into<String>) -> Self {
         Self {
             app_name: app_name.into(),

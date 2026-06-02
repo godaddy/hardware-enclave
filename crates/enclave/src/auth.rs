@@ -46,6 +46,8 @@ impl AuthHandle {
         }
     }
 
+    /// Return the platform's authentication capabilities. Equivalent to
+    /// [`platform_auth_capabilities()`][crate::platform_auth_capabilities].
     pub fn capabilities(&self) -> AuthCapabilities {
         platform_auth_capabilities()
     }
@@ -119,6 +121,7 @@ impl AuthHandle {
         {}
     }
 
+    /// Which hardware security backend this handle targets.
     pub fn backend_kind(&self) -> BackendKind {
         self.backend_kind
     }

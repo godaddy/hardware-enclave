@@ -49,8 +49,17 @@ impl EncryptorHandle {
             .map_err(Error::from)
     }
 
-    /// ECIES encrypt using the named key.
-    /// Wire format: [0x01 version][65B pubkey][12B nonce][ciphertext][16B GCM tag].
+    /// ECIES encrypt `plaintext` using the named key.
+    ///
+    /// Wire format: `[0x01 version][65B ephemeral pubkey][12B nonce][ciphertext][16B GCM tag]`.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::KeyNotFound`] if no key with this label exists.
+    /// - [`Error::AuthDenied`] if the keychain ACL denies access to the wrapping key.
+    /// - [`Error::AuthRequired`] if the device is locked or the GUI session is absent.
+    /// - [`Error::UserCancelled`] if the user dismissed a biometric prompt.
+    /// - [`Error::EncryptFailed`] for underlying hardware or crypto failures.
     pub fn encrypt(&self, label: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
         self.inner
             .encryptor()
@@ -58,7 +67,17 @@ impl EncryptorHandle {
             .map_err(Error::from)
     }
 
-    /// ECIES decrypt using the named key. Returns plaintext in a Zeroizing wrapper.
+    /// ECIES decrypt `ciphertext` using the named key.
+    ///
+    /// Returns plaintext in a [`Zeroizing`] wrapper that scrubs the buffer on drop.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::KeyNotFound`] if no key with this label exists.
+    /// - [`Error::AuthDenied`] if the keychain ACL denies access to the wrapping key.
+    /// - [`Error::AuthRequired`] if the device is locked or the GUI session is absent.
+    /// - [`Error::UserCancelled`] if the user dismissed a biometric prompt.
+    /// - [`Error::DecryptFailed`] if the ciphertext is corrupt or has been tampered with.
     pub fn decrypt(&self, label: &str, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
         let pt = self
             .inner

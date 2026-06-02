@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use enclaveapp_core::metadata::{atomic_write, compute_meta_hmac_bytes};
+use rand::TryRngCore;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
@@ -74,6 +75,22 @@ impl TamperEvidentHandle {
         Self {
             app_name,
             hmac_key,
+            mode: IntegrityMode::Sidecar,
+        }
+    }
+
+    /// Create a handle with a random ephemeral HMAC key — no platform secure store access.
+    ///
+    /// The key is generated from `OsRng` and held in memory only. Suitable for
+    /// testing, CI, and development examples where interactive prompts are unacceptable.
+    pub(crate) fn new_ephemeral(app_name: String) -> Self {
+        let mut key = vec![0_u8; 32];
+        rand::rngs::OsRng
+            .try_fill_bytes(&mut key)
+            .expect("OsRng must succeed for ephemeral key generation");
+        Self {
+            app_name,
+            hmac_key: Some(Zeroizing::new(key)),
             mode: IntegrityMode::Sidecar,
         }
     }

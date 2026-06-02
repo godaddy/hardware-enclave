@@ -247,14 +247,20 @@ impl SecurityKeyHandle {
         Ok(())
     }
 
-    /// Which backend this handle uses.
-    pub fn backend_kind(&self) -> BackendKind {
+    /// Which hardware security backend backs this handle.
+    ///
+    /// Returns `None` when the platform authenticator is not available on this
+    /// platform (macOS, unsupported Linux without a WSL bridge). A `None` result
+    /// indicates that [`generate`][SecurityKeyHandle::generate] and
+    /// [`sign`][SecurityKeyHandle::sign] will always return
+    /// [`Error::NotAvailable`][crate::Error::NotAvailable].
+    pub fn backend_kind(&self) -> Option<BackendKind> {
         match &self.backend {
             #[cfg(target_os = "windows")]
-            SkBackend::Native => BackendKind::Tpm,
+            SkBackend::Native => Some(BackendKind::Tpm),
             #[cfg(target_os = "linux")]
-            SkBackend::Bridge { .. } => BackendKind::TpmBridge,
-            SkBackend::Unavailable => BackendKind::Keyring, // sentinel: not applicable
+            SkBackend::Bridge { .. } => Some(BackendKind::TpmBridge),
+            SkBackend::Unavailable => None,
         }
     }
 
@@ -453,7 +459,9 @@ impl SecurityKeyHandle {
 ///
 /// This matches the formula used by sshenc when `app_name == "sshenc"`,
 /// ensuring backward compatibility with existing credentials.
-pub fn rp_id_for(app_name: &str, label: &str) -> String {
+///
+/// This is an internal derivation helper and is not part of the stable public API.
+pub(crate) fn rp_id_for(app_name: &str, label: &str) -> String {
     let mut h = Sha256::new();
     h.update(app_name.as_bytes());
     h.update(b"-rp-id-v1\x00");
@@ -466,7 +474,9 @@ pub fn rp_id_for(app_name: &str, label: &str) -> String {
 }
 
 /// Derive a deterministic 32-byte user ID for FIDO2 make-credential.
-pub fn user_id_for(app_name: &str, label: &str) -> Vec<u8> {
+///
+/// This is an internal derivation helper and is not part of the stable public API.
+pub(crate) fn user_id_for(app_name: &str, label: &str) -> Vec<u8> {
     let mut h = Sha256::new();
     h.update(app_name.as_bytes());
     h.update(b"-user-id-v1\x00");

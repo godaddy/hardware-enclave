@@ -1,8 +1,24 @@
 // Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
-//! Hardware-backed key management for macOS Secure Enclave, Windows TPM 2.0,
-//! and Linux TPM/keyring.
+//! Hardware-backed key management and in-process memory protection.
+//!
+//! The `enclave` crate provides two distinct capabilities:
+//!
+//! **Hardware key management** — ECDSA P-256 signing and ECIES P-256 encryption
+//! backed by the platform hardware security module (macOS Secure Enclave,
+//! Windows TPM 2.0, Linux TPM 2.0 / keyring). Keys never leave the hardware.
+//! User-presence enforcement (Touch ID, Windows Hello) is built in.
+//!
+//! **In-process memory protection** — guard-paged, mlock'd buffers
+//! ([`SecureBuffer`]), Arc-wrapped thread-safe secret storage ([`LockedBuffer`]),
+//! AES-256-GCM in-memory sealed secrets ([`MemoryEnclave`]), and a tiered pool
+//! of locked memory slots ([`pool_acquire`]). Ported from
+//! [asherah-ffi](https://github.com/godaddy/asherah-ffi), these components
+//! defend against heap-scraping attacks on long-lived processes.
+//!
+//! Both capabilities compose: decrypted key material returned from the HSM layer
+//! can be placed directly into a [`SecureBuffer`] or [`MemoryEnclave`].
 //!
 //! # Quick start
 //!
@@ -40,21 +56,23 @@ pub use auth::{platform_auth_capabilities, AuthCapabilities, AuthHandle};
 pub use capabilities::{
     has_keychain_entitlement, is_binary_signed, security_capabilities, SecurityCapabilities,
 };
-pub use config::{EnclaveConfig, LinuxConfig, MacOsConfig, PlatformConfig, WindowsConfig};
+pub use config::{
+    EnclaveConfig, LinuxConfig, MacOsConfig, PlatformConfig, WindowsConfig, WindowsSoftwareFallback,
+};
 pub use credential::{classify_credential, CredentialState, LifecyclePolicy};
 pub use encryption::EncryptorHandle;
 pub use error::{Error, Result};
 pub use exec::{IntegrationType, SecureProcess, TempSecretFile};
 pub use factory::{
     create_auth, create_encryptor, create_security_key, create_signer, create_tamper_evident,
+    create_tamper_evident_ephemeral,
 };
 pub use integrity::{IntegrityMode, TamperEvidentHandle, VerifyOutcome};
 pub use memory::{
     coffer_view, init_pool, pool_acquire, pool_release, zeroize_all_registered_at_shutdown,
     LockedBuffer, MemoryEnclave, PoolSlot, SecureBuffer, TieredPool, TieredPoolConfig,
 };
-pub use security_key::{
-    rp_id_for, user_id_for, SecurityKeyHandle, SecurityKeyInfo, SecurityKeySignature,
-};
+pub use security_key::{SecurityKeyHandle, SecurityKeyInfo, SecurityKeySignature};
 pub use signing::SignerHandle;
 pub use types::{AccessPolicy, BackendKind, KeyInfo, KeyType, PresenceMode, PresenceOptions};
+pub use zeroize::Zeroizing;

@@ -4,58 +4,81 @@
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// The hardware security module is absent, not enrolled, or unreachable.
     #[error("hardware security module not available")]
     NotAvailable,
+    /// No key with the given label exists in this app's key store.
     #[error("key not found: {label}")]
     KeyNotFound { label: String },
+    /// A key with this label already exists.
     #[error("duplicate key label: {label}")]
     DuplicateLabel { label: String },
+    /// The label is syntactically invalid (empty, too long, or contains illegal characters).
     #[error("invalid key label: {reason}")]
     InvalidLabel { reason: String },
+    /// The signing operation failed.
     #[error("signing failed: {detail}")]
     SignFailed { detail: String },
+    /// The encryption operation failed.
     #[error("encryption failed: {detail}")]
     EncryptFailed { detail: String },
+    /// The decryption operation failed; the ciphertext may be corrupt or have been tampered with.
     #[error("decryption failed: {detail}")]
     DecryptFailed { detail: String },
+    /// The OS keychain / TPM ACL has a Deny entry for this binary.
     #[error("authentication denied for '{label}'")]
     AuthDenied { label: String },
+    /// User authentication is required but the device is locked or no GUI session is available.
     #[error("authentication required for '{label}': {detail}")]
     AuthRequired { label: String, detail: String },
+    /// The user dismissed the biometric or PIN prompt.
     #[error("user cancelled authentication for '{label}'")]
     UserCancelled { label: String },
+    /// A lower-level key operation failed.
     #[error("key operation failed — {operation}: {detail}")]
     KeyOperation { operation: String, detail: String },
+    /// File HMAC mismatch — the file has been modified outside the API.
     #[error("tamper detected: {path}")]
     TamperDetected { path: String },
     /// Returned from factory construction (not first use) when a config option
     /// requires a code-signed binary with the named entitlement/feature.
+    ///
+    /// The requested configuration requires a code-signed binary with a specific entitlement.
     #[error("feature '{feature}' requires a code-signed binary")]
     RequiresSigning { feature: String },
-    /// Returned from generate_key() when the backend cannot enforce the
-    /// requested AccessPolicy (e.g. BiometricOnly on Linux keyring/TPM).
+    /// The backend cannot enforce the requested `AccessPolicy` (e.g. `BiometricOnly` on Linux).
+    ///
+    /// Returned from `generate_key()` when the backend cannot enforce the
+    /// requested `AccessPolicy` (e.g. `BiometricOnly` on Linux keyring/TPM).
     #[error("access policy '{policy}' is not supported by the current backend")]
     PolicyNotSupported { policy: String },
-    /// Returned from sign_with_presence() when PresenceMode::Strict is
+    /// `sign_with_presence(Strict, ...)` was called on a platform without biometric support.
+    ///
+    /// Returned from `sign_with_presence()` when `PresenceMode::Strict` is
     /// requested but the platform has no user-presence support.
     #[error("user presence is not available on this platform")]
     PresenceNotAvailable,
-    /// The requested feature is not yet implemented. Check the feature string for guidance.
+    /// This API is not yet fully implemented on this platform. Check the `feature` string.
     #[error("not implemented: {feature}")]
     NotImplemented { feature: String },
-    /// The key's stored access policy does not match the requested policy.
+    /// The key's stored access policy does not match. Regenerate the key.
+    ///
     /// This typically indicates the key was generated with a different policy
     /// and should be regenerated.
     #[error("access policy mismatch: {detail}")]
     PolicyMismatch { detail: String },
+    /// A configuration value is invalid.
     #[error("config error: {0}")]
     Config(String),
+    /// An I/O error occurred.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    /// An in-process memory protection operation failed (guard-page allocation, mlock, etc.).
     #[error("memory error: {0}")]
     Memory(String),
 }
 
+/// Shorthand `Result` type for this crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl From<enclaveapp_core::Error> for Error {
