@@ -695,7 +695,7 @@ pub fn bridge_sign(
 /// shape rather than silently creating it.
 ///
 /// History: paired with `bridge_list_keys` becoming standalone
-/// (libenclaveapp PR #110), this finishes off the
+/// (enclave PR #110), this finishes off the
 /// `call_bridge_after_signing_init` audit -- of the public bridge
 /// helpers, only `bridge_sign` legitimately needs the init prelude
 /// (signing requires a real key for the given label).

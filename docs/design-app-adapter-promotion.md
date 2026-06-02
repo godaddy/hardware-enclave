@@ -1,4 +1,4 @@
-# Design: Promote enclaveapp-app-adapter into libenclaveapp
+# Design: Promote enclaveapp-app-adapter into enclave
 
 ## Problem
 
@@ -6,7 +6,7 @@ Each enclave app (awsenc, sso-jwt, sshenc, npmenc) independently re-implements t
 
 ## Goal
 
-Move generic infrastructure into libenclaveapp so consuming apps become thin configuration + domain logic. The three integration types from the adapter become first-class concepts in the library.
+Move generic infrastructure into enclave so consuming apps become thin configuration + domain logic. The three integration types from the adapter become first-class concepts in the library.
 
 ## Integration Type Taxonomy
 
@@ -40,7 +40,7 @@ The target application can only read a static config file. We write secrets to a
 consuming app (awsenc, sshenc, sso-jwt, npmenc)
   │  Thin layer: AppSpec, domain-specific bindings, CLI
   │
-  ├── enclaveapp-app-adapter (promoted to libenclaveapp)
+  ├── enclaveapp-app-adapter (promoted to enclave)
   │   ├── BindingStore / SecretStore — credential management
   │   ├── AppSpec / IntegrationType — app classification
   │   ├── Resolver — find executables
@@ -58,7 +58,7 @@ consuming app (awsenc, sshenc, sso-jwt, npmenc)
       └── Traits, types, metadata, atomic I/O
 ```
 
-## New Crates in libenclaveapp
+## New Crates in enclave
 
 ### 1. `enclaveapp-app-adapter` (moved from npmenc)
 
@@ -158,7 +158,7 @@ Each app provides its magic bytes and blob count. awsenc uses `AWSE` with 2 blob
 
 ### npmenc
 - Move `enclaveapp-app-adapter/` out of npmenc repo entirely
-- Update Cargo.toml path deps to `../libenclaveapp/crates/enclaveapp-app-adapter`
+- Update Cargo.toml path deps to `../enclave/crates/enclaveapp-app-adapter`
 - Remove the now-empty adapter directory from npmenc
 
 ## Feature Flags
@@ -184,21 +184,21 @@ Apps opt-in to what they need:
 
 ## Implementation Plan
 
-### Phase 1: Move enclaveapp-app-adapter into libenclaveapp (this PR)
-1. Copy `enclaveapp-app-adapter/` from npmenc to `libenclaveapp/crates/enclaveapp-app-adapter/`
+### Phase 1: Move enclaveapp-app-adapter into enclave (this PR)
+1. Copy `enclaveapp-app-adapter/` from npmenc to `enclave/crates/enclaveapp-app-adapter/`
 2. Fix the `NPMENC_CONFIG_DIR` hardcoding → derive env var name from app_name
 3. Add to workspace members
 4. Update npmenc's Cargo.toml to point to the new location
 5. Tests pass in both repos
 
 ### Phase 2: Consolidate TPM bridge servers
-1. Create `enclaveapp-tpm-bridge` crate in libenclaveapp
+1. Create `enclaveapp-tpm-bridge` crate in enclave
 2. Extract shared bridge server logic
 3. Slim awsenc-tpm-bridge and sso-jwt-tpm-bridge to thin wrappers
 4. Tests pass in all 3 repos
 
 ### Phase 3: Extract shared binary cache format
-1. Create `enclaveapp-cache` crate in libenclaveapp
+1. Create `enclaveapp-cache` crate in enclave
 2. Extract format from awsenc-core and sso-jwt-lib
 3. Apps use library with their magic bytes
 4. Tests pass in all 3 repos
@@ -217,7 +217,7 @@ Apps opt-in to what they need:
 
 ## Risks
 
-1. **Path dependency management:** All repos use `path = "../libenclaveapp/crates/..."`. Adding a new crate to libenclaveapp requires updating Cargo.toml in each consuming repo. Mitigated by doing all changes in coordinated PRs.
+1. **Path dependency management:** All repos use `path = "../enclave/crates/..."`. Adding a new crate to enclave requires updating Cargo.toml in each consuming repo. Mitigated by doing all changes in coordinated PRs.
 
 2. **Feature flag complexity:** More features means more possible build configurations to test. Mitigated by CI testing the common combinations.
 

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`libenclaveapp` is a shared Rust library for hardware-backed key management across macOS (Secure Enclave via CryptoKit), Windows (TPM 2.0 via CNG), and Linux (keyring or TPM 2.0). It provides signing (ECDSA P-256) and encryption (ECIES via ECDH P-256 + AES-GCM) behind feature flags, plus WSL integration and a TPM bridge for WSL→Windows communication.
+`enclave` is a shared Rust library for hardware-backed key management across macOS (Secure Enclave via CryptoKit), Windows (TPM 2.0 via CNG), and Linux (keyring or TPM 2.0). It provides signing (ECDSA P-256) and encryption (ECIES via ECDH P-256 + AES-GCM) behind feature flags, plus WSL integration and a TPM bridge for WSL→Windows communication.
 
 Three applications consume this library:
 - **sshenc** — SSH key management (signing)
@@ -88,7 +88,7 @@ must never happen again.
 
 ### Process Hardening
 
-Any binary that consumes `libenclaveapp` is by definition handling
+Any binary that consumes `enclave` is by definition handling
 hardware-backed secret material. **All such binaries MUST call
 `enclaveapp_core::process::harden_process()` as the first line of
 `main()`** — before any argument parsing, before any environment

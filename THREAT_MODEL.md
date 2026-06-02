@@ -1,4 +1,4 @@
-# libenclaveapp Threat Model
+# Enclave Threat Model
 
 By Jay Gowdy
 
@@ -11,25 +11,25 @@ By Jay Gowdy
 | Contributors | Jay Gowdy |
 | Jira tickets | TBD |
 | Readiness Review | TBD |
-| AWS account numbers | N/A. `libenclaveapp` is a Rust library and does not own AWS-hosted production infrastructure. |
+| AWS account numbers | N/A. `enclave` is a Rust library and does not own AWS-hosted production infrastructure. |
 | Incident Response Sharepoint Link | TBD |
 | Cat | TBD |
 
 ## Abstract
 
 This threat modeling document gives security considerations for
-`libenclaveapp` based on the current architecture and implementation. It covers
+`enclave` based on the current architecture and implementation. It covers
 security assumptions, security features built into the design, threats and
 mitigations, external dependencies, and residual risks accepted by the
 engineering team.
 
-`libenclaveapp` is a shared Rust library for hardware-backed signing and
+`enclave` is a shared Rust library for hardware-backed signing and
 credential encryption. It is consumed by applications such as `sshenc`,
 `gocode-dev`, `awsenc`, `sso-jwt`, and `npmenc`.
 
 ## Overview
 
-`libenclaveapp` provides platform-neutral traits and adapters for P-256 signing,
+`enclave` provides platform-neutral traits and adapters for P-256 signing,
 ECIES-style encryption, platform key lifecycle, metadata persistence,
 application storage bootstrap, WSL bridge communication, process hardening, and
 app-adapter secret delivery patterns.
@@ -39,14 +39,14 @@ app-adapter secret delivery patterns.
 | Product State | In-Production |
 | Application Prod URL | N/A. Library crate consumed by local applications. |
 | Application Dev/Test URL | N/A. |
-| Source Code | https://github.com/godaddy/libenclaveapp |
+| Source Code | https://github.com/godaddy/enclave |
 | Exposure | Internal/library code; not directly externally accessible. |
 | Network zones deployed in | N/A. Runs inside consuming applications on developer workstations. |
 | People/groups with access to production servers | N/A. No production servers are operated by this repository. |
 
 ## Security Guarantee
 
-`libenclaveapp` aims to provide the following guarantees to consuming
+`enclave` aims to provide the following guarantees to consuming
 applications:
 
 - Hardware-backed P-256 private keys are non-exportable on supported Secure
@@ -93,7 +93,7 @@ Misuse that must be prevented or bounded:
 
 ## Out of Scope
 
-- Security of applications that consume credentials after `libenclaveapp`
+- Security of applications that consume credentials after `enclave`
   returns them.
 - Security of external identity providers, cloud providers, SSH servers,
   package registries, or application-specific APIs.
@@ -120,7 +120,7 @@ The following assumptions relate to attackers and their available resources:
 - A WSL attacker may control user-writable Linux paths and environment
   variables.
 - A network attacker may observe or modify application-layer traffic handled by
-  consuming apps, but `libenclaveapp` itself does not create network protocols.
+  consuming apps, but `enclave` itself does not create network protocols.
 - A supply-chain attacker may modify dependencies, bridge binaries, build tools,
   or consuming applications.
 
@@ -147,23 +147,23 @@ The following assumptions relate to attackers and their available resources:
 
 Relevant diagrams are maintained under:
 
-- Diagram folder: https://github.com/godaddy/libenclaveapp/tree/main/docs/diagrams
+- Diagram folder: https://github.com/godaddy/enclave/tree/main/docs/diagrams
 
 Key diagrams for review:
 
-- Architecture diagram (PNG with embedded draw.io source): https://github.com/godaddy/libenclaveapp/blob/main/docs/diagrams/architecture.png
-- Data flow diagram: https://github.com/godaddy/libenclaveapp/blob/main/docs/diagrams/data-flow-diagram.mmd
-- Workspace context: https://github.com/godaddy/libenclaveapp/blob/main/docs/diagrams/workspace-context.mmd
-- App-storage backend selection: https://github.com/godaddy/libenclaveapp/blob/main/docs/diagrams/app-storage-backend-selection.mmd
-- Encryption flow: https://github.com/godaddy/libenclaveapp/blob/main/docs/diagrams/encryption-flow.mmd
-- Signing flow: https://github.com/godaddy/libenclaveapp/blob/main/docs/diagrams/signing-flow.mmd
-- Metadata trust boundary: https://github.com/godaddy/libenclaveapp/blob/main/docs/diagrams/metadata-trust-boundary.mmd
-- WSL bridge flow: https://github.com/godaddy/libenclaveapp/blob/main/docs/diagrams/wsl-bridge-flow.mmd
-- Adapter integration types: https://github.com/godaddy/libenclaveapp/blob/main/docs/diagrams/adapter-integration-types.mmd
+- Architecture diagram (PNG with embedded draw.io source): https://github.com/godaddy/enclave/blob/main/docs/diagrams/architecture.png
+- Data flow diagram: https://github.com/godaddy/enclave/blob/main/docs/diagrams/data-flow-diagram.mmd
+- Workspace context: https://github.com/godaddy/enclave/blob/main/docs/diagrams/workspace-context.mmd
+- App-storage backend selection: https://github.com/godaddy/enclave/blob/main/docs/diagrams/app-storage-backend-selection.mmd
+- Encryption flow: https://github.com/godaddy/enclave/blob/main/docs/diagrams/encryption-flow.mmd
+- Signing flow: https://github.com/godaddy/enclave/blob/main/docs/diagrams/signing-flow.mmd
+- Metadata trust boundary: https://github.com/godaddy/enclave/blob/main/docs/diagrams/metadata-trust-boundary.mmd
+- WSL bridge flow: https://github.com/godaddy/enclave/blob/main/docs/diagrams/wsl-bridge-flow.mmd
+- Adapter integration types: https://github.com/godaddy/enclave/blob/main/docs/diagrams/adapter-integration-types.mmd
 
 Architecture guidance mapping:
 
-| Question | Answer for `libenclaveapp` |
+| Question | Answer for `enclave` |
 |---|---|
 | Hosting location | Library code inside consuming local applications. No AWS account, region, VPC, subnet, AZ, or datacenter deployment is owned by this repo. |
 | Major resources | Rust crates, platform backends, local metadata/key files, platform secure storage, optional WSL bridge child process. |
@@ -177,7 +177,7 @@ Architecture guidance mapping:
 
 ## Network ACLs
 
-`libenclaveapp` is a library and does not expose inbound network services or
+`enclave` is a library and does not expose inbound network services or
 own network ACLs. WSL bridge communication is local stdio between a Linux client
 process and a Windows bridge child process.
 
@@ -197,11 +197,11 @@ process and a Windows bridge child process.
 
 ## Data Flow Diagram
 
-Primary DFD: https://github.com/godaddy/libenclaveapp/blob/main/docs/diagrams/data-flow-diagram.mmd
+Primary DFD: https://github.com/godaddy/enclave/blob/main/docs/diagrams/data-flow-diagram.mmd
 
-Encryption DFD: https://github.com/godaddy/libenclaveapp/blob/main/docs/diagrams/encryption-flow.mmd
+Encryption DFD: https://github.com/godaddy/enclave/blob/main/docs/diagrams/encryption-flow.mmd
 
-Signing DFD: https://github.com/godaddy/libenclaveapp/blob/main/docs/diagrams/signing-flow.mmd
+Signing DFD: https://github.com/godaddy/enclave/blob/main/docs/diagrams/signing-flow.mmd
 
 Data processed or transmitted:
 
@@ -276,7 +276,7 @@ Output: Child process launch, redacted reads, or credential-source output.
 
 | Name | Description | Trust details |
 |---|---|---|
-| Consuming application | Binary using `libenclaveapp` | Trusted to request appropriate backend, call process hardening early, and handle returned secrets correctly. |
+| Consuming application | Binary using `enclave` | Trusted to request appropriate backend, call process hardening early, and handle returned secrets correctly. |
 | Same-UID process | Code running as the same OS user | Limited trust. Can access session resources and may call local APIs; active same-UID malware is not fully defeated. |
 | Root/admin | Privileged local actor | Not trusted and out of scope for confidentiality of in-memory secrets. |
 | Secure Enclave / TPM | Hardware security module | Trusted for non-exportability and hardware-backed operations. |
@@ -310,7 +310,7 @@ Output: Child process launch, redacted reads, or credential-source output.
 
 ## Authentication / Authorization
 
-`libenclaveapp` does not authenticate users to a web service. It relies on local
+`enclave` does not authenticate users to a web service. It relies on local
 OS identity, platform secure-storage ACLs, hardware access policy, and consumer
 application policy.
 
@@ -322,13 +322,13 @@ and device access.
 
 ## Source Code
 
-- Product repository: https://github.com/godaddy/libenclaveapp
-- Design: https://github.com/godaddy/libenclaveapp/blob/main/DESIGN.md
-- Diagrams: https://github.com/godaddy/libenclaveapp/tree/main/docs/diagrams
+- Product repository: https://github.com/godaddy/enclave
+- Design: https://github.com/godaddy/enclave/blob/main/DESIGN.md
+- Diagrams: https://github.com/godaddy/enclave/tree/main/docs/diagrams
 
 ## Monitoring/Alerting
 
-`libenclaveapp` is a local library and does not operate a central production
+`enclave` is a local library and does not operate a central production
 service with on-call alerting from this repository.
 
 | Question | Answer |

@@ -1,7 +1,7 @@
 // Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
-//! Mock backends for testing libenclaveapp without hardware.
+//! enclave without hardware.
 //!
 //! Provides [`MockKeyBackend`] which implements all three core traits
 //! (`EnclaveKeyManager`, `EnclaveSigner`, `EnclaveEncryptor`) using

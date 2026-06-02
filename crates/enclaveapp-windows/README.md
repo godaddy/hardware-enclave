@@ -1,6 +1,6 @@
 # enclaveapp-windows
 
-Windows TPM 2.0 backend for libenclaveapp, using CNG (NCrypt/BCrypt).
+Windows TPM 2.0 backend for enclave, using CNG (NCrypt/BCrypt).
 
 Keys are generated inside the TPM via the Microsoft Platform Crypto Provider and never leave the hardware. CNG persists keys internally by name -- no private key files on disk.
 

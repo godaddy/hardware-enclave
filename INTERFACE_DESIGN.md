@@ -10,7 +10,7 @@ tier patterns see `crates/enclave/DELIVERY_TIERS.md`.
 
 ## Motivation
 
-The `libenclaveapp` internal crates accumulated rough edges making FFI bindings painful:
+The `enclave` internal crates accumulated rough edges making FFI bindings painful:
 opaque `Box<dyn Trait>`, platform types leaking through, two error hierarchies, `serde_json::Value`
 in public types, and `sign_with_presence()` silently ignoring presence params on non-macOS.
 

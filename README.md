@@ -1,4 +1,4 @@
-# libenclaveapp
+# Enclave
 
 Build hardware-secured wrapper binaries for any application — from SSH agents to npm registries — with minimal code and maximum platform coverage.
 
@@ -10,7 +10,7 @@ Hardware security modules (Secure Enclave, TPM 2.0) can make private keys non-ex
 
 ## The solution
 
-`libenclaveapp` provides a shared Rust substrate that handles all the hard parts — platform detection, HSM integration, key lifecycle, encrypted storage, process launching, config file management — so you can build a thin wrapper binary (an **enclave app**) that secures any target application with hardware-backed keys.
+`enclave` provides a shared Rust substrate that handles all the hard parts — platform detection, HSM integration, key lifecycle, encrypted storage, process launching, config file management — so you can build a thin wrapper binary (an **enclave app**) that secures any target application with hardware-backed keys.
 
 A new enclave app needs only its domain-specific logic. Everything else is shared:
 
@@ -33,7 +33,7 @@ Every enclave app falls into one of four categories. Types 1-3 provide **control
 
 Types 1-3 wrap a target application and control the secret's entire lifecycle. The adapter selects the most secure: Type 1 > Type 2 > Type 3. Type 4 apps secure the **acquisition and storage** of credentials but cannot prevent consumers from exporting them to env vars, piping to files, or other uncontrolled use.
 
-## Built with libenclaveapp
+## Built with enclave
 
 | Application | Type | What it does | Lines of app-specific code |
 |---|:---:|---|---|

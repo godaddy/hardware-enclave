@@ -26,7 +26,7 @@ use std::process::Command;
 /// boundary — a shadowed `xcrun` earlier on `$PATH` can no longer
 /// substitute a poisoned swiftc / ar into the static bridge object
 /// that ends up linked into the binary. See
-/// libenclaveapp/THREAT_MODEL.md "Build-time trust".
+/// THREAT_MODEL.md "Build-time trust".
 const XCRUN: &str = "/usr/bin/xcrun";
 
 /// Resolve a toolchain tool by asking `xcrun --find`. The returned
