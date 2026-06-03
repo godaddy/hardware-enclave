@@ -176,6 +176,41 @@ impl AppEncryptionStorage {
     #[allow(clippy::needless_return, unreachable_code)]
     pub fn init(mut config: StorageConfig) -> Result<Self> {
         config.app_name = crate::internal::core::signing::ensure_safe_app_name(&config.app_name);
+
+        // Mock encryption backend (Linux only — SoftwareEncryptor is Linux-specific).
+        #[cfg(all(feature = "mock", target_os = "linux"))]
+        {
+            use super::MOCK_STORAGE_ENV;
+            if let Ok(val) = std::env::var(MOCK_STORAGE_ENV) {
+                if !val.is_empty() {
+                    tracing::warn!(
+                        app = %config.app_name,
+                        "{MOCK_STORAGE_ENV} is set — returning software encryptor (no hardware backing)"
+                    );
+                    let keys_dir = config.keys_dir.clone().unwrap_or_else(|| {
+                        std::env::temp_dir().join(format!(
+                            "hardware-enclave-mock-encryption-{}",
+                            config.app_name
+                        ))
+                    });
+                    drop(std::fs::create_dir_all(&keys_dir));
+                    let encryptor = crate::internal::keyring::SoftwareEncryptor::with_keys_dir(
+                        &config.app_name,
+                        keys_dir.clone(),
+                    );
+                    Self::ensure_key(&encryptor, &config, &keys_dir, config.access_policy)?;
+                    return Ok(Self {
+                        kind: BackendKind::Keyring,
+                        app_name: config.app_name.clone(),
+                        key_label: config.key_label.clone(),
+                        access_policy: config.access_policy,
+                        keys_dir,
+                        inner: StorageInner::Software(encryptor),
+                    });
+                }
+            }
+        }
+
         #[cfg(target_os = "macos")]
         {
             return Self::init_macos(&config);
