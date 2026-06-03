@@ -2,6 +2,12 @@
 # CARGO_REGISTRY_TOKEN must be set in GitHub repo secrets before this workflow
 # will succeed. Generate a token at https://crates.io/settings/tokens and add
 # it as a repository secret named CARGO_REGISTRY_TOKEN.
+#
+# To release: bump `version` in the workspace Cargo.toml, commit, merge to
+# main, then:
+#
+#   git tag v<version>
+#   git push origin v<version>
 
 name: Publish
 
@@ -17,58 +23,72 @@ jobs:
   check:
     name: Check / Test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - name: macOS
             os: macos-latest
-            features: "--features enclaveapp-apple/signing,enclaveapp-apple/encryption,enclaveapp-keyring/signing,enclaveapp-keyring/encryption"
+            features: "--features signing,encryption,mock"
           - name: Windows
             os: windows-latest
-            features: "--features enclaveapp-windows/signing,enclaveapp-windows/encryption,enclaveapp-keyring/signing,enclaveapp-keyring/encryption"
+            features: "--features signing,encryption,mock"
           - name: Linux
             os: ubuntu-latest
-            features: "--features enclaveapp-linux-tpm/signing,enclaveapp-linux-tpm/encryption,enclaveapp-keyring/signing,enclaveapp-keyring/encryption"
+            features: "--features signing,encryption,linux-tpm,mock"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config libtss2-dev
-      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: actions/cache@v4
+
+      - uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
       - name: Check formatting
         run: cargo fmt --all -- --check
+
       - name: Clippy
-        run: cargo clippy --workspace --all-targets ${{ matrix.features }} -- -D warnings
+        run: cargo clippy --package hardware-enclave --all-targets ${{ matrix.features }} -- -D warnings
+
       - name: Build
-        run: cargo build --workspace ${{ matrix.features }}
+        run: cargo build --package hardware-enclave ${{ matrix.features }}
+
       - name: Test
-        run: cargo test --workspace ${{ matrix.features }}
+        run: cargo test --package hardware-enclave ${{ matrix.features }}
 
   publish:
     name: Publish to crates.io
     needs: [check]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config libtss2-dev
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-publish-${{ hashFiles('**/Cargo.lock') }}
+
       - name: Publish hardware-enclave crate
         run: cargo publish -p hardware-enclave --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
