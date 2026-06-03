@@ -334,7 +334,7 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-app-adapter"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -355,7 +355,7 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-app-storage"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "aes-gcm",
  "enclaveapp-apple",
@@ -375,7 +375,7 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-apple"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -392,7 +392,7 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-bridge"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "base64 0.22.1",
  "enclaveapp-core",
@@ -402,14 +402,14 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-build-support"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "winresource",
 ]
 
 [[package]]
 name = "enclaveapp-cache"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "enclaveapp-core",
  "fs4",
@@ -419,7 +419,7 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-core"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "dirs",
  "fs2",
@@ -435,7 +435,7 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-keyring"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "aes-gcm",
  "dirs",
@@ -453,7 +453,7 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-linux-tpm"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "aes-gcm",
  "dirs",
@@ -471,7 +471,7 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-test-software"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "aes-gcm",
  "dirs",
@@ -487,7 +487,7 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-test-support"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "enclaveapp-core",
  "rand",
@@ -496,7 +496,7 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-tpm-bridge"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "base64 0.22.1",
  "enclaveapp-bridge",
@@ -509,7 +509,7 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-windows"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "aes-gcm",
  "dirs",
@@ -527,7 +527,7 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-windows-webauthn"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "ciborium",
  "enclaveapp-core",
@@ -537,7 +537,7 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-wsl"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "enclaveapp-core",
 ]
@@ -701,7 +701,7 @@ dependencies = [
 
 [[package]]
 name = "hardware-enclave"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "aes-gcm",
  "anyhow",

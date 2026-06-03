@@ -37,6 +37,10 @@ tempfile       = { workspace = true, optional = true }
 toml           = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+# `windows` is required by memory/memcall.rs for VirtualAlloc/VirtualLock/VirtualProtect
+# (Windows equivalents of mmap/mlock/mprotect used by SecureBuffer/TieredPool).
+# It is therefore activated by the `memory` feature (always-on by default) as well as
+# signing/encryption. winresource is only needed for PE resource embedding (signing/encryption).
 windows      = { workspace = true, optional = true }
 winresource  = { workspace = true, optional = true }
 
@@ -53,7 +57,11 @@ default = ["signing", "encryption", "memory"]
 #    Use with `default-features = false, features = ["memory"]` to get
 #    a lightweight build suitable for libraries like asherah-ffi that only
 #    need the memory hardening primitives.
-memory = []
+memory = [
+    # On Windows, the memory subsystem (SecureBuffer/TieredPool/LockedBuffer) requires
+    # VirtualAlloc/VirtualLock/VirtualProtect from the `windows` crate in memory/memcall.rs.
+    "dep:windows",
+]
 
 # ── signing: P-256 ECDSA signing via platform HSM (Secure Enclave / TPM / keyring)
 signing = [
