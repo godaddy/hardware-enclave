@@ -467,4 +467,90 @@ mod tests {
         buf.destroy().unwrap();
         assert!(!buf.is_alive());
     }
+
+    // ── OS-level guard-page enforcement (fork-based) ──────────────────────────
+    //
+    // These tests verify that freeze() (PROT_NONE inner region) and the
+    // permanent guard pages actually cause SIGSEGV/SIGBUS at the OS level when
+    // accessed incorrectly. Ported from asherah-ffi's memcall_protection.rs
+    // which tested the same property on the underlying MemBuf primitive.
+
+    #[cfg(unix)]
+    #[test]
+    fn frozen_buffer_write_segfaults_in_child() {
+        // Fill while mutable, freeze (inner → PROT_READ), fork a child that
+        // attempts to WRITE — it must be killed by SIGSEGV or SIGBUS.
+        // (Reading a frozen buffer is allowed; writing is not.)
+        let mut buf = SecureBuffer::new(4096).unwrap();
+        buf.bytes().fill(0x42);
+        buf.freeze().unwrap();
+
+        let ptr: *mut u8 = buf.as_slice().as_ptr().cast_mut();
+
+        // SAFETY: fork is unsafe; child exits unconditionally.
+        unsafe {
+            let pid = libc::fork();
+            assert!(pid >= 0, "fork failed");
+            if pid == 0 {
+                // Child: write to PROT_READ region → should SIGSEGV/SIGBUS.
+                std::ptr::write_volatile(ptr, 0xFF);
+                // Must never reach here.
+                libc::_exit(0);
+            } else {
+                let mut status: i32 = 0;
+                libc::waitpid(pid, &mut status, 0);
+                assert!(
+                    libc::WIFSIGNALED(status),
+                    "child should have been killed by a signal (status={status})"
+                );
+                let sig = libc::WTERMSIG(status);
+                assert!(
+                    sig == libc::SIGSEGV || sig == libc::SIGBUS,
+                    "expected SIGSEGV or SIGBUS on frozen-buffer write, got {sig}"
+                );
+            }
+        }
+
+        buf.melt().unwrap();
+        buf.destroy().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn guard_page_write_segfaults_in_child() {
+        // The pre/post guard pages are permanently PROT_NONE. Fork a child
+        // that writes one byte past the inner region (into the post guard) —
+        // it must be killed by SIGSEGV or SIGBUS.
+        let ps = page_size();
+        let buf = SecureBuffer::new(ps).unwrap();
+
+        // inner_ptr points to the inner region; inner_ptr + ps is the post guard.
+        let post_guard_ptr: *mut u8 = unsafe { buf.inner_ptr.as_ptr().add(ps).cast() };
+
+        // SAFETY: fork is unsafe; child exits unconditionally.
+        unsafe {
+            let pid = libc::fork();
+            assert!(pid >= 0, "fork failed");
+            if pid == 0 {
+                // Child: write to PROT_NONE guard page → should SIGSEGV/SIGBUS.
+                std::ptr::write_volatile(post_guard_ptr, 0xFF);
+                // Must never reach here.
+                libc::_exit(0);
+            } else {
+                let mut status: i32 = 0;
+                libc::waitpid(pid, &mut status, 0);
+                assert!(
+                    libc::WIFSIGNALED(status),
+                    "child should have been killed by a signal (status={status})"
+                );
+                let sig = libc::WTERMSIG(status);
+                assert!(
+                    sig == libc::SIGSEGV || sig == libc::SIGBUS,
+                    "expected SIGSEGV or SIGBUS on guard-page write, got {sig}"
+                );
+            }
+        }
+        // Buffer remains intact in the parent — guard pages are still PROT_NONE.
+        drop(buf);
+    }
 }

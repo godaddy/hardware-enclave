@@ -92,3 +92,20 @@ fn harden_windows() {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+#[allow(clippy::unwrap_used, unsafe_code)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn harden_process_zeroes_core_dump_rlimit() {
+        harden_process();
+        // SAFETY: getrlimit is a well-defined POSIX syscall.
+        let mut lim: libc::rlimit = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::getrlimit(libc::RLIMIT_CORE, &mut lim) };
+        assert_eq!(rc, 0, "getrlimit failed");
+        assert_eq!(lim.rlim_cur, 0, "rlim_cur must be 0 after harden_process");
+        assert_eq!(lim.rlim_max, 0, "rlim_max must be 0 after harden_process");
+    }
+}
