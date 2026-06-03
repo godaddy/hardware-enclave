@@ -164,7 +164,7 @@ impl AppSigningBackend {
                         std::env::temp_dir()
                             .join(format!("hardware-enclave-mock-signing-{}", config.app_name))
                     });
-                    let _ = std::fs::create_dir_all(&keys_dir);
+                    drop(std::fs::create_dir_all(&keys_dir));
                     let signer = crate::internal::keyring::SoftwareSigner::with_keys_dir(
                         &config.app_name,
                         keys_dir.clone(),
