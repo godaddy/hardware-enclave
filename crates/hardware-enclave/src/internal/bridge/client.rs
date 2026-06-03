@@ -950,10 +950,17 @@ mod tests {
         drop(fs::remove_file(path));
     }
 
+    #[cfg(unix)]
     #[test]
     fn find_bridge_returns_none_when_not_found() {
+        // Must hold the mutex: other tests in this file set ENCLAVEAPP_BRIDGE_PATH
+        // and if this test runs concurrently it would see the env var and return Some.
+        let _lock = SCRIPT_TEST_MUTEX.lock().unwrap();
+        // Ensure neither bridge-path env var is set.
+        std::env::remove_var("ENCLAVEAPP_BRIDGE_PATH");
+        std::env::remove_var("ENCLAVEAPP_NONEXISTENT_TEST_APP_BRIDGE_PATH");
         let result = find_bridge("enclaveapp-nonexistent-test-app");
-        assert!(result.is_none());
+        assert!(result.is_none(), "expected None, got: {result:?}");
     }
 
     // ---- Authenticode / PE signature check -----------------------------
