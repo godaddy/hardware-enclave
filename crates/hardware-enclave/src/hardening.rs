@@ -16,6 +16,9 @@
 ///
 /// - **All Unix:** `setrlimit(RLIMIT_CORE, 0)` — disables core dumps that could
 ///   expose in-memory secrets to the filesystem.
+/// - **macOS:** `ptrace(PT_DENY_ATTACH, …)` — kernel-enforced denial of future
+///   debugger attachment. The kernel kills this process if any debugger attempts
+///   to attach after this call. This is not a detection check — it is a hard gate.
 /// - **Linux:** `prctl(PR_SET_DUMPABLE, 0)` — makes `/proc/<pid>/mem` root-only;
 ///   denies ptrace-attach from non-root same-UID peers.
 /// - **Linux:** `prctl(PR_SET_NO_NEW_PRIVS, 1)` — subsequent `exec*` cannot gain
@@ -30,6 +33,8 @@
 pub fn harden_process() {
     #[cfg(unix)]
     harden_unix();
+    #[cfg(target_os = "macos")]
+    deny_attach_macos();
     #[cfg(target_os = "linux")]
     harden_linux();
     #[cfg(windows)]
@@ -46,6 +51,32 @@ fn harden_unix() {
     let rc = unsafe { libc::setrlimit(libc::RLIMIT_CORE, &zero) };
     if rc != 0 {
         tracing::warn!("harden_process: setrlimit(RLIMIT_CORE, 0) failed (rc={rc})");
+    }
+}
+
+/// Instruct the kernel to deny future debugger attachment to this process.
+///
+/// `PT_DENY_ATTACH` (macOS-only) causes the kernel to send SIGSEGV and kill this
+/// process if any caller subsequently attempts `ptrace(PT_ATTACH, …)`. It is a
+/// kernel-enforced barrier, not a polling check — the protection persists for the
+/// lifetime of the process and cannot be removed by the process itself.
+///
+/// Note: if the process is already being traced when this call is made (e.g. it
+/// was launched under lldb/gdb), the call has no effect on the existing attachment
+/// but will block new attach attempts. For this reason it must be the first line
+/// of `main()`.
+#[cfg(target_os = "macos")]
+fn deny_attach_macos() {
+    // SAFETY: ptrace(PT_DENY_ATTACH, 0, NULL, 0) is well-defined on macOS. The
+    // kernel processes it inline and the call either succeeds (returns 0) or the
+    // process is already being traced (ENOTSUP/EPERM; best-effort, log and continue).
+    let rc = unsafe { libc::ptrace(libc::PT_DENY_ATTACH, 0, std::ptr::null_mut(), 0) };
+    if rc != 0 {
+        let errno = std::io::Error::last_os_error();
+        tracing::warn!(
+            "harden_process: PT_DENY_ATTACH failed (rc={rc}, errno={errno}) — \
+             process may already be traced"
+        );
     }
 }
 

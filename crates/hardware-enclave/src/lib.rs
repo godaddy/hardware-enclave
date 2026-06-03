@@ -66,15 +66,19 @@ pub use memory::{
 };
 pub use zeroize::Zeroizing;
 
-// ── Key management — only compiled with signing or encryption feature ─────────
+// ── Key management + platform utilities (signing or encryption) ──────────────
 #[cfg(any(feature = "signing", feature = "encryption"))]
 pub mod auth;
+#[cfg(any(feature = "signing", feature = "encryption"))]
+pub mod bridge_server;
 #[cfg(any(feature = "signing", feature = "encryption"))]
 pub mod capabilities;
 #[cfg(any(feature = "signing", feature = "encryption"))]
 pub mod config;
 #[cfg(any(feature = "signing", feature = "encryption"))]
 pub mod credential;
+#[cfg(any(feature = "signing", feature = "encryption"))]
+pub mod diagnostics;
 #[cfg(any(feature = "signing", feature = "encryption"))]
 pub mod encryption;
 #[cfg(any(feature = "signing", feature = "encryption"))]
