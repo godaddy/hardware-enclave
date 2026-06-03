@@ -14,6 +14,14 @@ repository = "https://github.com/godaddy/hardware-enclave"
 [workspace.dependencies]
 # Internal crates
 hardware-enclave = { path = "crates/hardware-enclave" }
+# Legacy source dirs kept for path-dep consumers (sshenc force-software feature).
+# Not workspace members — just available as path deps via workspace.dependencies
+# so their own Cargo.toml files (which use workspace = true internally) continue
+# to parse correctly when referenced via path deps from consuming repos.
+enclaveapp-core = { path = "crates/enclaveapp-core" }
+enclaveapp-bridge = { path = "crates/enclaveapp-bridge" }
+enclaveapp-windows = { path = "crates/enclaveapp-windows" }
+enclaveapp-windows-webauthn = { path = "crates/enclaveapp-windows-webauthn" }
 # default-features = false so that workspace members can opt out of the
 # `linux-tpm` (libtss2) backend by not enabling it; members that want it
 # forward `enclaveapp-app-storage/linux-tpm` via their own `linux-tpm`
