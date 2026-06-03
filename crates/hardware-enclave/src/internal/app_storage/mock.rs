@@ -140,6 +140,118 @@ impl EncryptionStorage for MockEncryptionStorage {
     }
 }
 
+// ── MockSigner ────────────────────────────────────────────────────────────────
+
+use crate::internal::core::{
+    traits::{EnclaveKeyManager, EnclaveSigner},
+    types::{AccessPolicy, KeyType},
+    Error as CoreError, Result as CoreResult,
+};
+use elliptic_curve::sec1::ToEncodedPoint;
+use p256::{
+    ecdsa::{signature::Signer, DerSignature, SigningKey},
+    SecretKey,
+};
+use std::collections::BTreeMap;
+use std::sync::Mutex;
+
+/// Cross-platform mock signer for testing without hardware.
+///
+/// Stores P-256 private keys in memory (keyed by label). Implements the same
+/// traits as the platform hardware backends so test code can use it via the
+/// normal `create_signer()` factory when `ENCLAVEAPP_MOCK_STORAGE` is set.
+pub struct MockSigner {
+    keys: Mutex<BTreeMap<String, SecretKey>>,
+}
+
+impl std::fmt::Debug for MockSigner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MockSigner").finish()
+    }
+}
+
+impl MockSigner {
+    pub fn new() -> Self {
+        Self {
+            keys: Mutex::new(BTreeMap::new()),
+        }
+    }
+}
+
+impl Default for MockSigner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[allow(unsafe_code)]
+// Safety: MockSigner uses Mutex for all interior mutability.
+unsafe impl Send for MockSigner {}
+#[allow(unsafe_code)]
+unsafe impl Sync for MockSigner {}
+
+fn lock_mock<'mutex>(
+    mutex: &'mutex Mutex<BTreeMap<String, SecretKey>>,
+) -> std::sync::MutexGuard<'mutex, BTreeMap<String, SecretKey>> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+impl EnclaveKeyManager for MockSigner {
+    fn generate(
+        &self,
+        label: &str,
+        _key_type: KeyType,
+        _policy: AccessPolicy,
+    ) -> CoreResult<Vec<u8>> {
+        let secret = SecretKey::random(&mut elliptic_curve::rand_core::OsRng);
+        let pub_bytes = secret
+            .public_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec();
+        lock_mock(&self.keys).insert(label.to_string(), secret);
+        Ok(pub_bytes)
+    }
+
+    fn public_key(&self, label: &str) -> CoreResult<Vec<u8>> {
+        lock_mock(&self.keys)
+            .get(label)
+            .map(|k| k.public_key().to_encoded_point(false).as_bytes().to_vec())
+            .ok_or_else(|| CoreError::KeyNotFound {
+                label: label.to_string(),
+            })
+    }
+
+    fn list_keys(&self) -> CoreResult<Vec<String>> {
+        Ok(lock_mock(&self.keys).keys().cloned().collect())
+    }
+
+    fn delete_key(&self, label: &str) -> CoreResult<()> {
+        lock_mock(&self.keys)
+            .remove(label)
+            .map(|_| ())
+            .ok_or_else(|| CoreError::KeyNotFound {
+                label: label.to_string(),
+            })
+    }
+
+    fn is_available(&self) -> bool {
+        true
+    }
+}
+
+impl EnclaveSigner for MockSigner {
+    fn sign(&self, label: &str, data: &[u8]) -> CoreResult<Vec<u8>> {
+        let keys = lock_mock(&self.keys);
+        let secret = keys.get(label).ok_or_else(|| CoreError::KeyNotFound {
+            label: label.to_string(),
+        })?;
+        let signing_key = SigningKey::from(secret);
+        let sig: DerSignature = signing_key.sign(data);
+        Ok(sig.to_bytes().to_vec())
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {

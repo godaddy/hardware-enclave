@@ -40,6 +40,10 @@ enum SigningInner {
 
     #[cfg(target_os = "linux")]
     WslBridge(BridgeSignerWrapper),
+
+    // Cross-platform mock backend — only compiled when the `mock` feature is on.
+    #[cfg(feature = "mock")]
+    Mock(crate::internal::app_storage::mock::MockSigner),
 }
 
 /// Wrapper that implements `EnclaveSigner` + `EnclaveKeyManager` by calling
@@ -149,29 +153,21 @@ impl AppSigningBackend {
     pub fn init(mut config: StorageConfig) -> Result<Self> {
         config.app_name = crate::internal::core::signing::ensure_safe_app_name(&config.app_name);
 
-        // Mock signing backend (Linux only — keyring::SoftwareSigner is Linux-specific).
-        // On macOS and Windows the real hardware backend is used even in mock mode.
-        #[cfg(all(feature = "mock", target_os = "linux"))]
+        // Cross-platform mock signing backend. Works on macOS, Windows, and Linux.
+        #[cfg(feature = "mock")]
         {
             use super::MOCK_STORAGE_ENV;
             if let Ok(val) = std::env::var(MOCK_STORAGE_ENV) {
                 if !val.is_empty() {
                     tracing::warn!(
                         app = %config.app_name,
-                        "{MOCK_STORAGE_ENV} is set — returning software signer (no hardware backing)"
-                    );
-                    let keys_dir = config.keys_dir.clone().unwrap_or_else(|| {
-                        std::env::temp_dir()
-                            .join(format!("hardware-enclave-mock-signing-{}", config.app_name))
-                    });
-                    drop(std::fs::create_dir_all(&keys_dir));
-                    let signer = crate::internal::keyring::SoftwareSigner::with_keys_dir(
-                        &config.app_name,
-                        keys_dir.clone(),
+                        "{MOCK_STORAGE_ENV} is set — returning in-memory mock signer (no hardware backing)"
                     );
                     return Ok(Self {
                         kind: BackendKind::Keyring,
-                        inner: SigningInner::Software(signer),
+                        inner: SigningInner::Mock(
+                            crate::internal::app_storage::mock::MockSigner::new(),
+                        ),
                     });
                 }
             }
@@ -425,6 +421,9 @@ impl AppSigningBackend {
 
             #[cfg(target_os = "linux")]
             SigningInner::WslBridge(s) => s,
+
+            #[cfg(feature = "mock")]
+            SigningInner::Mock(s) => s,
         }
     }
 
@@ -445,6 +444,9 @@ impl AppSigningBackend {
 
             #[cfg(target_os = "linux")]
             SigningInner::WslBridge(s) => s,
+
+            #[cfg(feature = "mock")]
+            SigningInner::Mock(s) => s,
         }
     }
 

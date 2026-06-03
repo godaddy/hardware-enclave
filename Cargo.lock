@@ -334,7 +334,7 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-bridge"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64 0.22.1",
  "enclaveapp-core",
@@ -344,7 +344,7 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "dirs",
  "fs2",
@@ -360,7 +360,7 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-test-software"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "aes-gcm",
  "dirs",
@@ -376,7 +376,7 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-test-support"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "enclaveapp-core",
  "rand",
@@ -385,7 +385,7 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-tpm-bridge"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64 0.22.1",
  "enclaveapp-bridge",
@@ -398,7 +398,7 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-windows"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "aes-gcm",
  "dirs",
@@ -416,7 +416,7 @@ dependencies = [
 
 [[package]]
 name = "enclaveapp-windows-webauthn"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ciborium",
  "enclaveapp-core",
@@ -583,7 +583,7 @@ dependencies = [
 
 [[package]]
 name = "hardware-enclave"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
