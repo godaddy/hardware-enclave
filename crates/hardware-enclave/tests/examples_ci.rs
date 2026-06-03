@@ -108,8 +108,10 @@ fn example_signing_mock() {
 }
 
 #[test]
+#[cfg(target_os = "linux")] // Mock encryption uses SoftwareEncryptor which is Linux-only.
 fn example_encryption_mock() {
-    // ENCLAVE_MOCK=1 causes the encryption example to use the software P-256 backend.
+    // ENCLAVE_MOCK=1 sets ENCLAVEAPP_MOCK_STORAGE=1, routing create_encryptor() through a
+    // software encryptor backed by a tempdir. No Keychain, no HSM.
     assert!(
         run_example_with_env("encryption", &[("ENCLAVE_MOCK", "1")]),
         "encryption example (mock mode) failed"
