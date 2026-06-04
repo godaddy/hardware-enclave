@@ -46,3 +46,34 @@ pub use crate::internal::windows::dpapi_fallback::FallbackDecision;
     target_os = "windows"
 ))]
 pub use crate::internal::windows::dpapi_fallback::should_use_dpapi_after_tpm_failure;
+
+/// Human-readable description of the Windows secure storage backend.
+///
+/// Detects VM presence and Windows Hello availability once per process
+/// (cached via [`std::sync::OnceLock`]) and returns the appropriate label:
+///
+/// - Non-VM, Hello/PIN configured: TPM 2.0 + Windows Hello gate
+/// - Non-VM, no Hello: TPM 2.0 + password gate
+/// - VM environment: ECIES P-256 + Windows Data Protection API (user-bound)
+#[cfg(all(
+    any(feature = "signing", feature = "encryption"),
+    target_os = "windows"
+))]
+pub fn windows_backend_description() -> &'static str {
+    use std::sync::OnceLock;
+
+    static IS_VM: OnceLock<bool> = OnceLock::new();
+    static HELLO_AVAILABLE: OnceLock<bool> = OnceLock::new();
+
+    let is_vm = *IS_VM.get_or_init(|| collect_vm_diagnostics().vm_detected);
+    if is_vm {
+        return "✓ Windows ECIES P-256, Windows Data Protection API (user-bound)";
+    }
+
+    let hello = *HELLO_AVAILABLE.get_or_init(crate::internal::windows::hello_gate::is_available);
+    if hello {
+        "✓ Windows TPM 2.0 ECDH P-256 ECIES, Windows Hello gate"
+    } else {
+        "✓ Windows TPM 2.0 ECDH P-256 ECIES, password gate"
+    }
+}
