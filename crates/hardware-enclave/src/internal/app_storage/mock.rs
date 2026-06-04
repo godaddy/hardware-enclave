@@ -184,6 +184,10 @@ impl MockSigner {
     fn key_path(&self, label: &str) -> PathBuf {
         self.keys_dir.join(format!("{label}.mock-key"))
     }
+
+    fn pub_path(&self, label: &str) -> PathBuf {
+        self.keys_dir.join(format!("{label}.pub"))
+    }
 }
 
 impl Default for MockSigner {
@@ -235,6 +239,11 @@ impl EnclaveKeyManager for MockSigner {
             operation: "mock_save".into(),
             detail: e.to_string(),
         })?;
+        // Write SEC1 public key cache so list_labels() (which scans .pub files) finds it.
+        std::fs::write(self.pub_path(label), &pub_bytes).map_err(|e| CoreError::KeyOperation {
+            operation: "mock_save_pub".into(),
+            detail: e.to_string(),
+        })?;
         Ok(pub_bytes)
     }
 
@@ -248,11 +257,12 @@ impl EnclaveKeyManager for MockSigner {
     }
 
     fn list_keys(&self) -> CoreResult<Vec<String>> {
+        // Scan .pub files — consistent with compat::list_labels so sshenc list works.
         let mut labels = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&self.keys_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map(|e| e == "mock-key").unwrap_or(false) {
+                if path.extension().map(|e| e == "pub").unwrap_or(false) {
                     if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                         labels.push(stem.to_string());
                     }
@@ -272,7 +282,10 @@ impl EnclaveKeyManager for MockSigner {
         std::fs::remove_file(&path).map_err(|e| CoreError::KeyOperation {
             operation: "mock_delete".into(),
             detail: e.to_string(),
-        })
+        })?;
+        // Best-effort .pub cleanup.
+        drop(std::fs::remove_file(self.pub_path(label)));
+        Ok(())
     }
 
     fn is_available(&self) -> bool {
