@@ -73,9 +73,12 @@ pub unsafe fn os_alloc(len: usize) -> Result<NonNull<u8>, MemError> {
 
 #[cfg(unix)]
 pub unsafe fn os_lock(ptr: *mut u8, len: usize) -> Result<(), MemError> {
-    // Best-effort: exclude from core dumps.
+    // Best-effort: exclude from core dumps and zero in child processes after fork.
     #[cfg(target_os = "linux")]
-    let _ = libc::madvise(ptr.cast(), len, libc::MADV_DONTDUMP);
+    {
+        let _ = libc::madvise(ptr.cast(), len, libc::MADV_DONTDUMP);
+        let _ = libc::madvise(ptr.cast(), len, libc::MADV_WIPEONFORK);
+    }
     // macOS: no MADV_NOCORE; use MADV_ZERO_WIRED_PAGES as a best-effort hint.
     #[cfg(target_os = "macos")]
     let _ = libc::madvise(ptr.cast(), len, libc::MADV_ZERO_WIRED_PAGES);
