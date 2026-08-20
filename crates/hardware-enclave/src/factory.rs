@@ -1,7 +1,7 @@
 // Copyright 2026 Jay Gowdy
 // SPDX-License-Identifier: MIT
 
-use crate::internal::app_storage::BackendKind;
+use crate::internal::app_storage::{BackendKind, EncryptionStorage};
 
 use crate::auth::AuthHandle;
 #[cfg(target_os = "macos")]
@@ -28,11 +28,17 @@ pub fn create_signer(config: &EnclaveConfig) -> Result<SignerHandle> {
 }
 
 /// Create an encryption handle for the current platform.
+///
+/// The handle reports the backend the storage actually initialized, the same
+/// way [`create_signer`] does. Static platform detection cannot answer this:
+/// Linux resolves to `Keyring` before `AppEncryptionStorage::init` has probed
+/// for a TPM, and Windows resolves to `Tpm` before the VM-only DPAPI fallback
+/// has been taken.
 pub fn create_encryptor(config: &EnclaveConfig) -> Result<EncryptorHandle> {
     let storage_config = validate_and_resolve_config(config)?;
-    let kind = resolve_backend_kind();
     let storage = crate::internal::app_storage::AppEncryptionStorage::init(storage_config)
         .map_err(Error::from)?;
+    let kind = storage.backend_kind();
     Ok(EncryptorHandle::new(storage, kind))
 }
 
@@ -146,6 +152,11 @@ fn validate_and_resolve_config(
     Ok(sc)
 }
 
+/// Backend the platform is *expected* to use, from static detection alone.
+///
+/// This is a capability guess made before any storage is initialized, so it
+/// must not be reported as the backend a key actually lives in. Handles that
+/// own a storage backend report `backend_kind()` from that storage instead.
 #[allow(clippy::needless_return, unreachable_code)]
 fn resolve_backend_kind() -> BackendKind {
     #[cfg(target_os = "macos")]
@@ -205,6 +216,33 @@ mod tests {
             matches!(result, Err(Error::RequiresSigning { .. })),
             "expected RequiresSigning, got: {:?}",
             result
+        );
+    }
+
+    /// A Linux host with a working TPM is the case where static platform
+    /// detection and the initialized backend disagree: `resolve_backend_kind`
+    /// returns `Keyring` while `AppEncryptionStorage::init` picks the TPM.
+    ///
+    /// Skipped on hosts without a TPM, where the two cannot diverge.
+    #[cfg(all(
+        target_os = "linux",
+        target_env = "gnu",
+        feature = "linux-tpm",
+        feature = "encryption"
+    ))]
+    #[test]
+    fn encryptor_reports_the_backend_the_storage_initialized() {
+        if !crate::internal::linux_tpm::is_available() {
+            return;
+        }
+        let keys_dir = tempfile::tempdir().unwrap();
+        let mut config = EnclaveConfig::new("testapp", "backend-kind");
+        config.keys_dir = Some(keys_dir.path().to_path_buf());
+        let handle = create_encryptor(&config).unwrap();
+        assert_eq!(
+            handle.backend_kind(),
+            BackendKind::Tpm,
+            "a TPM-backed key must not be reported as the keyring fallback"
         );
     }
 }
