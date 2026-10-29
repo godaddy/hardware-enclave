@@ -86,12 +86,13 @@ impl LinuxTpmEncryptor {
             detail: e.to_string(),
         })?;
 
-        let key_handle =
-            ctx.load(primary_handle, private, public)
-                .map_err(|e| Error::KeyOperation {
+        let key_handle  =
+            ctx.execute_with_nullauth_session(|ctx| {
+                ctx.load(primary_handle, private, public)
+            }).map_err(|e| Error::KeyOperation {
                     operation: "load_key".into(),
                     detail: e.to_string(),
-                })?;
+            })?;
 
         Ok((ctx, key_handle))
     }
@@ -157,11 +158,11 @@ impl EnclaveKeyManager for LinuxTpmEncryptor {
         let primary_handle = tpm::create_primary(&mut ctx)?;
         let template = tpm::encryption_key_template()?;
 
-        let result = ctx
+        let result = ctx.execute_with_nullauth_session(|ctx| {ctx
             .create(primary_handle, template, None, None, None, None)
-            .map_err(|e| Error::GenerateFailed {
+        }).map_err(|e| Error::GenerateFailed {
                 detail: format!("TPM create: {e}"),
-            })?;
+        })?;
 
         // Extract the public key as SEC1 uncompressed point
         let pub_key = tpm::extract_public_key(&result.out_public)?;
@@ -336,11 +337,11 @@ impl EnclaveEncryptor for LinuxTpmEncryptor {
         let eph_point = sec1_to_ecc_point(eph_pub_bytes)?;
 
         // ECDH via TPM -- the private key never leaves the hardware
-        let shared_point =
+        let shared_point = ctx.execute_with_nullauth_session(|ctx| {
             ctx.ecdh_z_gen(key_handle, eph_point)
-                .map_err(|e| Error::DecryptFailed {
-                    detail: format!("TPM ECDH: {e}"),
-                })?;
+        }).map_err(|e| Error::DecryptFailed {
+            detail: format!("TPM ECDH: {e}"),
+        })?;
 
         // The shared secret is the x-coordinate of the resulting point
         let shared_x = shared_point.x().value();

@@ -102,8 +102,9 @@ pub fn primary_key_template() -> Result<Public> {
 /// Create the primary storage key. Returns its handle.
 pub fn create_primary(ctx: &mut Context) -> Result<tss_esapi::handles::KeyHandle> {
     let template = primary_key_template()?;
-    let result = ctx
+    let result = ctx.execute_with_nullauth_session(|ctx| {ctx
         .create_primary(Hierarchy::Owner, template, None, None, None, None)
+    })
         .map_err(|e| Error::KeyOperation {
             operation: "create_primary".into(),
             detail: e.to_string(),

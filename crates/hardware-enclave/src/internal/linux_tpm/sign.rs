@@ -61,12 +61,12 @@ impl LinuxTpmSigner {
             detail: e.to_string(),
         })?;
 
-        let key_handle =
+        let key_handle =ctx.execute_with_nullauth_session(|ctx| {
             ctx.load(primary_handle, private, public)
-                .map_err(|e| Error::KeyOperation {
-                    operation: "load_key".into(),
-                    detail: e.to_string(),
-                })?;
+        }).map_err(|e|Error::KeyOperation{
+            operation: "load_key".into(),
+            detail: e.to_string(),
+        })?;
 
         Ok((ctx, key_handle))
     }
@@ -92,11 +92,11 @@ impl EnclaveKeyManager for LinuxTpmSigner {
         let primary_handle = tpm::create_primary(&mut ctx)?;
         let template = tpm::signing_key_template()?;
 
-        let result = ctx
+        let result = ctx.execute_with_nullauth_session(|ctx| {ctx
             .create(primary_handle, template, None, None, None, None)
-            .map_err(|e| Error::GenerateFailed {
-                detail: format!("TPM create: {e}"),
-            })?;
+        }).map_err(|e| Error::GenerateFailed {
+            detail: format!("TPM create: {e}"),
+         })?;
 
         // Extract the public key as SEC1 uncompressed point
         let pub_key = tpm::extract_public_key(&result.out_public)?;
@@ -330,9 +330,9 @@ impl EnclaveSigner for LinuxTpmSigner {
         .map_err(|e| Error::SignFailed {
             detail: format!("ticket: {e}"),
         })?;
-        let signature = ctx
+        let signature = ctx.execute_with_nullauth_session(|ctx| {ctx
             .sign(key_handle, digest, SignatureScheme::Null, ticket)
-            .map_err(|e| Error::SignFailed {
+        }).map_err(|e| Error::SignFailed {
                 detail: format!("TPM sign: {e}"),
             })?;
 
