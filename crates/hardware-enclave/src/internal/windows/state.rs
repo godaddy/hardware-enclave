@@ -297,6 +297,28 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_deleted_key_keeps_local_artifacts_when_authoritative_delete_fails() {
+        let dir = test_dir("delete-fails");
+        std::fs::write(dir.join("work.meta"), "{}").unwrap();
+        std::fs::write(dir.join("work.pub"), "pub").unwrap();
+
+        let state = KeyMaterialState::acquire(&dir).unwrap();
+        let err = state
+            .reconcile_deleted_key("work", || {
+                Err(Error::KeyOperation {
+                    operation: "open_key".into(),
+                    detail: "NCryptOpenKey: simulated TPM busy".into(),
+                })
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, Error::KeyOperation { .. }));
+        assert!(dir.join("work.meta").exists());
+        assert!(dir.join("work.pub").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn key_material_state_acquire_creates_dir() {
         let dir = test_dir("create");
         std::fs::remove_dir_all(&dir).unwrap();
