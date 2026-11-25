@@ -170,11 +170,30 @@ fn open_key_with_flags(
             CERT_KEY_SPEC::default(),
             flags,
         )
-        .map_err(|_| Error::KeyNotFound {
-            label: label.to_string(),
-        })?;
+        .map_err(|e| open_key_error(label, &e))?;
     }
     Ok(NcryptHandle(NCRYPT_HANDLE(key_handle.0)))
+}
+
+/// Map an `NCryptOpenKey` failure to a crate error.
+///
+/// Only `NTE_BAD_KEYSET` means the key does not exist. Any other failure
+/// (TPM busy or not ready, access denied, `NTE_SILENT_CONTEXT`, ...) is
+/// passed on as a `KeyOperation` error: callers treat `KeyNotFound` as
+/// "already gone", so reporting a transient failure as missing would let
+/// `delete_key` remove the local metadata and report success while the
+/// key is still in the TPM.
+fn open_key_error(label: &str, error: &windows::core::Error) -> Error {
+    if error.code() == windows::Win32::Foundation::NTE_BAD_KEYSET {
+        Error::KeyNotFound {
+            label: label.to_string(),
+        }
+    } else {
+        Error::KeyOperation {
+            operation: "open_key".into(),
+            detail: format!("NCryptOpenKey: {error}"),
+        }
+    }
 }
 
 /// Delete a key from the TPM by application name and label.
@@ -244,4 +263,54 @@ pub fn enumerate_keys(provider: &NcryptHandle, app_name: &str) -> Result<Vec<Str
 
     labels.sort();
     Ok(labels)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use windows::Win32::Foundation::{
+        E_ACCESSDENIED, NTE_BAD_KEYSET, NTE_DEVICE_NOT_READY, NTE_SILENT_CONTEXT,
+    };
+
+    #[test]
+    fn bad_keyset_maps_to_key_not_found() {
+        let error = open_key_error("work", &windows::core::Error::from(NTE_BAD_KEYSET));
+        match error {
+            Error::KeyNotFound { label } => assert_eq!(label, "work"),
+            other => panic!("expected key not found, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn other_open_failures_are_not_reported_as_missing() {
+        // A key that exists but cannot be opened right now must not look
+        // absent: callers such as `delete_key` and `reconcile_deleted_key`
+        // treat `KeyNotFound` as "already gone" and drop the local state.
+        for code in [NTE_DEVICE_NOT_READY, NTE_SILENT_CONTEXT, E_ACCESSDENIED] {
+            let error = open_key_error("work", &windows::core::Error::from(code));
+            match error {
+                Error::KeyOperation { operation, detail } => {
+                    assert_eq!(operation, "open_key");
+                    assert!(
+                        detail.contains(&format!("{:#010X}", code.0)),
+                        "detail should carry the HRESULT, got {detail}"
+                    );
+                }
+                other => panic!("expected key operation error for {code:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a real TPM 2.0; run on the matrix-test laptop"]
+    fn opening_a_label_that_was_never_created_is_key_not_found() {
+        let provider = open_provider().expect("open_provider");
+        let label = format!("never-created-{}", std::process::id());
+        match open_key(&provider, "enclaveapp_test_open_key", &label) {
+            Err(Error::KeyNotFound { label: missing }) => assert_eq!(missing, label),
+            Err(other) => panic!("expected key not found, got {other:?}"),
+            Ok(_) => panic!("a label that was never created must not open"),
+        }
+    }
 }
